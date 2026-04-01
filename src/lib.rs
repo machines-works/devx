@@ -1,0 +1,14 @@
+pub mod config;
+pub mod control;
+pub mod deps;
+pub mod detect;
+pub mod events;
+pub mod git;
+pub mod infra;
+pub mod orchestrator;
+pub mod ports;
+pub mod process;
+pub mod proxy;
+pub mod tls;
+pub mod tui;
+pub mod watcher;

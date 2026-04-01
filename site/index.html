@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>devx — One command to run your entire dev stack.</title>
+  <style>
+    :root {
+      --bg: #050508;
+      --bg-card: #0a0a10;
+      --border: #15151f;
+      --text: #e0e0e8;
+      --text-dim: #5a5a7a;
+      --text-muted: #3a3a55;
+      --neon-purple: #a855f7;
+      --neon-cyan: #22d3ee;
+      --neon-green: #34d399;
+      --neon-pink: #f472b6;
+      --font-mono: 'Courier New', 'Lucida Console', monospace;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font-mono);
+      font-size: 14px;
+      line-height: 1.6;
+      overflow-x: hidden;
+    }
+
+    /* ── Scanlines overlay ── */
+    body::after {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background: repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 2px,
+        rgba(0, 0, 0, 0.03) 2px,
+        rgba(0, 0, 0, 0.03) 4px
+      );
+      pointer-events: none;
+      z-index: 9999;
+    }
+
+    a { color: inherit; text-decoration: none; }
+
+    .container { max-width: 800px; margin: 0 auto; padding: 0 20px; }
+
+    /* ── Grid background ── */
+    .grid-bg {
+      position: fixed;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(168, 85, 247, 0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(168, 85, 247, 0.03) 1px, transparent 1px);
+      background-size: 40px 40px;
+      pointer-events: none;
+      z-index: -1;
+    }
+
+    /* ── Nav ── */
+    nav {
+      border-bottom: 1px solid var(--border);
+      padding: 16px 0;
+    }
+    nav .container {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .nav-logo {
+      font-size: 14px;
+      font-weight: bold;
+      color: var(--neon-cyan);
+      text-shadow: 0 0 10px rgba(34, 211, 238, 0.3);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .nav-logo-ascii {
+      font-size: 10px;
+      line-height: 1.1;
+      color: var(--neon-cyan);
+      text-shadow: 0 0 8px rgba(34, 211, 238, 0.4);
+      white-space: pre;
+      letter-spacing: 0;
+    }
+    .nav-badge {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.15em;
+      color: var(--neon-pink);
+      border: 1px solid rgba(244, 114, 182, 0.3);
+      padding: 3px 10px;
+      text-shadow: 0 0 8px rgba(244, 114, 182, 0.3);
+    }
+
+    /* ── Hero ── */
+    .hero {
+      padding: 140px 0 100px;
+      text-align: center;
+      position: relative;
+    }
+    .hero::before {
+      content: '';
+      position: absolute;
+      top: -100px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 800px;
+      height: 600px;
+      background: radial-gradient(
+        ellipse at 50% 30%,
+        rgba(168, 85, 247, 0.07) 0%,
+        rgba(34, 211, 238, 0.03) 30%,
+        transparent 60%
+      );
+      pointer-events: none;
+    }
+
+    .hero-ascii {
+      font-size: clamp(8px, 1.8vw, 14px);
+      line-height: 1.15;
+      white-space: pre;
+      color: var(--text);
+      margin-bottom: 40px;
+      display: inline-block;
+      text-shadow: 0 0 20px rgba(168, 85, 247, 0.2);
+      letter-spacing: 0.05em;
+    }
+
+    .hero-tagline {
+      font-size: clamp(15px, 2.5vw, 20px);
+      color: var(--text-dim);
+      margin-bottom: 16px;
+      letter-spacing: 0.02em;
+    }
+    .hero-sub {
+      font-size: 13px;
+      color: var(--text-muted);
+      margin-bottom: 0;
+      max-width: 520px;
+      margin-left: auto;
+      margin-right: auto;
+      line-height: 1.7;
+    }
+
+    /* ── Hero preview (terminal in hero) ── */
+    .hero-preview {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      padding: 24px;
+      margin: 48px auto 56px;
+      max-width: 720px;
+      text-align: left;
+      overflow-x: auto;
+      position: relative;
+      box-shadow: 0 0 60px rgba(168, 85, 247, 0.06), 0 0 120px rgba(34, 211, 238, 0.03);
+    }
+
+    .cursor {
+      display: inline-block;
+      width: 8px;
+      height: 14px;
+      background: var(--neon-green);
+      margin-left: 2px;
+      animation: blink 1s step-end infinite;
+      vertical-align: text-bottom;
+    }
+    @keyframes blink {
+      50% { opacity: 0; }
+    }
+
+    /* ── Features ── */
+    .features { padding: 100px 0; }
+    .section-label {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.2em;
+      color: var(--text-muted);
+      margin-bottom: 32px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .feature-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 2px;
+    }
+
+    .feature-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      padding: 28px 24px;
+      position: relative;
+      overflow: hidden;
+      transition: border-color 0.2s;
+    }
+    .feature-card:hover {
+      border-color: rgba(168, 85, 247, 0.3);
+    }
+    .feature-card:hover .feature-index {
+      color: var(--neon-purple);
+      text-shadow: 0 0 8px rgba(168, 85, 247, 0.4);
+    }
+
+    .feature-index {
+      font-size: 10px;
+      color: var(--text-muted);
+      margin-bottom: 16px;
+      display: block;
+      transition: color 0.2s, text-shadow 0.2s;
+    }
+    .feature-title {
+      font-size: 13px;
+      font-weight: bold;
+      color: var(--text);
+      margin-bottom: 8px;
+    }
+    .feature-desc {
+      font-size: 12px;
+      color: var(--text-dim);
+      line-height: 1.7;
+    }
+    .feature-desc code {
+      color: var(--neon-cyan);
+      font-size: 11px;
+    }
+
+    /* ── Preview content (used in hero) ── */
+    .preview-bar {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 20px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .preview-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--text-muted);
+    }
+    .preview-dot:nth-child(1) { background: #ff5f57; }
+    .preview-dot:nth-child(2) { background: #febc2e; }
+    .preview-dot:nth-child(3) { background: #28c840; }
+
+    .preview-content {
+      font-size: 12px;
+      line-height: 1.8;
+      color: var(--text-dim);
+    }
+    .preview-content .h { color: var(--neon-cyan); text-shadow: 0 0 6px rgba(34, 211, 238, 0.2); }
+    .preview-content .g { color: var(--neon-green); text-shadow: 0 0 6px rgba(52, 211, 153, 0.2); }
+    .preview-content .y { color: #fbbf24; }
+    .preview-content .p { color: var(--neon-purple); }
+    .preview-content .d { color: var(--text-muted); }
+
+    /* ── CTA ── */
+    .cta {
+      padding: 120px 0;
+      text-align: center;
+      position: relative;
+    }
+    .cta::before {
+      content: '';
+      position: absolute;
+      bottom: 0;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 400px;
+      height: 400px;
+      background: radial-gradient(circle, rgba(34, 211, 238, 0.05) 0%, transparent 70%);
+      pointer-events: none;
+    }
+    .cta-label {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.2em;
+      color: var(--text-muted);
+      margin-bottom: 24px;
+    }
+    .cta-heading {
+      font-size: clamp(20px, 4vw, 32px);
+      font-weight: bold;
+      margin-bottom: 12px;
+      color: var(--text);
+    }
+    .cta-sub {
+      font-size: 13px;
+      color: var(--text-dim);
+      margin-bottom: 40px;
+    }
+
+    .install-block {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      padding: 20px 24px;
+      margin: 0 auto 32px;
+      max-width: 620px;
+      text-align: left;
+      position: relative;
+      cursor: pointer;
+      transition: border-color 0.2s;
+    }
+    .install-block:hover {
+      border-color: rgba(52, 211, 153, 0.4);
+    }
+    .install-block code {
+      font-size: 13px;
+      color: var(--neon-green);
+      text-shadow: 0 0 8px rgba(52, 211, 153, 0.2);
+    }
+    .install-block .install-hint {
+      position: absolute;
+      right: 16px;
+      top: 50%;
+      transform: translateY(-50%);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.15em;
+      color: var(--text-muted);
+      transition: color 0.2s;
+    }
+    .install-block:hover .install-hint {
+      color: var(--text-dim);
+    }
+
+    .btn-wa {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      background: transparent;
+      color: var(--neon-green);
+      font-family: var(--font-mono);
+      font-size: 13px;
+      font-weight: bold;
+      padding: 14px 28px;
+      border: 1px solid rgba(52, 211, 153, 0.4);
+      text-shadow: 0 0 10px rgba(52, 211, 153, 0.3);
+      transition: all 0.2s;
+      letter-spacing: 0.02em;
+    }
+    .btn-wa:hover {
+      background: rgba(52, 211, 153, 0.08);
+      border-color: var(--neon-green);
+      box-shadow: 0 0 20px rgba(52, 211, 153, 0.15);
+    }
+
+    /* ── Footer ── */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 24px 0;
+    }
+    footer .container {
+      display: flex;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    footer span {
+      font-size: 11px;
+      color: var(--text-muted);
+      letter-spacing: 0.02em;
+    }
+    footer a {
+      color: var(--text-dim);
+      transition: color 0.2s;
+    }
+    footer a:hover { color: var(--neon-purple); }
+
+    /* ── Responsive ── */
+    @media (max-width: 600px) {
+      .hero { padding: 80px 0 60px; }
+      .feature-grid { grid-template-columns: 1fr; }
+      footer .container { flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+
+  <div class="grid-bg"></div>
+
+  <nav>
+    <div class="container">
+      <span class="nav-logo"><span class="nav-logo-ascii">▓█▀▀▄ ▓█  ▄▀
+▓█  ▀█▓█▀▄
+▓█▄▄▀ ▓█ ▀▄</span></span>
+      <span class="nav-badge">COMING SOON</span>
+    </div>
+  </nav>
+
+  <section class="hero">
+    <div class="container">
+      <pre class="hero-ascii">
+ ██████╗  ███████╗██╗   ██╗██╗  ██╗
+ ██╔══██╗ ██╔════╝██║   ██║╚██╗██╔╝
+ ██║  ██║ █████╗  ██║   ██║ ╚███╔╝
+ ██║  ██║ ██╔══╝  ╚██╗ ██╔╝ ██╔██╗
+ ██████╔╝ ███████╗ ╚████╔╝ ██╔╝ ██╗
+ ╚═════╝  ╚══════╝  ╚═══╝  ╚═╝  ╚═╝</pre>
+
+      <div class="hero-preview">
+        <div class="preview-bar">
+          <span class="preview-dot"></span>
+          <span class="preview-dot"></span>
+          <span class="preview-dot"></span>
+        </div>
+        <div class="preview-content">
+<span class="d">$</span> <span class="g">devx up</span>
+<br>
+<br><span class="h"> devx</span> <span class="d">&middot;</span> <span class="p">myapp</span> <span class="d">&middot;</span> <span class="d">*.localhost:8080</span>
+<br><span class="d">SERVICE&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;DOMAIN&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;STATUS&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;PORT&nbsp;&nbsp;PROXY&nbsp;&nbsp;TIME</span>
+<br><span class="h">api</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="p">api.localhost</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="g">&bull; ready</span>&nbsp;&nbsp;&nbsp;&nbsp;50189&nbsp;&nbsp;8000&nbsp;&nbsp;&nbsp;12s
+<br><span class="h">worker</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="d">&mdash;</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="g">&bull; ready</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;12s
+<br><span class="h">web</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="p">web.localhost</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="g">&bull; ready</span>&nbsp;&nbsp;&nbsp;&nbsp;50193&nbsp;&nbsp;5173&nbsp;&nbsp;&nbsp;12s
+<br><span class="h">docs</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="p">docs.localhost</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="y">&bull; starting</span>&nbsp;50201&nbsp;&nbsp;4321&nbsp;&nbsp;&nbsp;3s
+<br>
+<br><span class="d">Logs &mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;</span>
+<br><span class="h">[api]</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;server listening on :50189
+<br><span class="h">[api]</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;connected to postgres
+<br><span class="p">[web]</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;VITE v6.0 ready in 412ms
+<br><span class="y">[docs]</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;building pages...<span class="cursor"></span>
+        </div>
+      </div>
+
+      <p class="hero-tagline">One command. Every service. Zero port conflicts.</p>
+      <p class="hero-sub">Auto-discovers free ports, runs a reverse proxy for stable URLs, routes local domains, and gives you a terminal dashboard for your entire stack.</p>
+    </div>
+  </section>
+
+  <section class="features">
+    <div class="container">
+      <p class="section-label">// how it works</p>
+      <div class="feature-grid">
+        <div class="feature-card">
+          <span class="feature-index">01</span>
+          <div class="feature-title">Auto port discovery</div>
+          <p class="feature-desc">Services bind to free ports. No more "address already in use".</p>
+        </div>
+        <div class="feature-card">
+          <span class="feature-index">02</span>
+          <div class="feature-title">Reverse proxy</div>
+          <p class="feature-desc">Stable URLs at fixed ports. Bookmarks and curl aliases never break.</p>
+        </div>
+        <div class="feature-card">
+          <span class="feature-index">03</span>
+          <div class="feature-title">Local domains</div>
+          <p class="feature-desc">Route by Host header &mdash; <code>api.localhost</code>, <code>web.localhost</code> &mdash; no /etc/hosts.</p>
+        </div>
+        <div class="feature-card">
+          <span class="feature-index">04</span>
+          <div class="feature-title">TUI dashboard</div>
+          <p class="feature-desc">All services, logs, and health in one terminal. No tab-hunting.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="cta">
+    <div class="container">
+      <p class="cta-label">// install</p>
+      <h2 class="cta-heading">Try it now</h2>
+      <p class="cta-sub">macOS &amp; Linux. One command.</p>
+      <div class="install-block" onclick="navigator.clipboard.writeText('curl -fsSL https://devx.machines.works/install.sh | sh')">
+        <code>curl -fsSL https://devx.machines.works/install.sh | sh</code>
+        <span class="install-hint">click to copy</span>
+      </div>
+      <p class="cta-sub">Feedback and war stories welcome.</p>
+      <a class="btn-wa" href="https://wa.me/5521993438353" target="_blank" rel="noopener noreferrer">
+        > message on whatsapp
+      </a>
+    </div>
+  </section>
+
+  <footer>
+    <div class="container">
+      <span>Built by <a href="https://machines.works" target="_blank" rel="noopener noreferrer">Machines Works</a></span>
+      <span>Part of the <a href="https://sharpi.dev" target="_blank" rel="noopener noreferrer">Sharpi</a> ecosystem</span>
+    </div>
+  </footer>
+
+</body>
+</html>
