@@ -60,6 +60,10 @@ enum Commands {
 }
 
 fn main() -> Result<()> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls crypto provider");
+
     let cli = Cli::parse();
     match cli.command {
         Commands::Up { daemon, services } => cmd_up(daemon, services),
