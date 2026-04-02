@@ -41,5 +41,31 @@ fn test_no_inject_when_port_present() {
 #[test]
 fn test_inject_uvicorn_port() {
     let result = Framework::Python.inject_port_flag("uvicorn app:app --host 0.0.0.0", 8090);
-    assert_eq!(result, Some("uvicorn app:app --host 0.0.0.0 --port 8090".to_string()));
+    assert_eq!(
+        result,
+        Some("uvicorn app:app --host 0.0.0.0 --port 8090".to_string())
+    );
+}
+
+#[test]
+fn test_detect_encore() {
+    let f = Framework::detect("encore run", Path::new("/nonexistent"));
+    assert!(matches!(f, Framework::Encore));
+}
+
+#[test]
+fn test_encore_injects_port_flag() {
+    let result = Framework::Encore.inject_port_flag("encore run", 5000);
+    assert_eq!(result, Some("encore run --port=5000".to_string()));
+}
+
+#[test]
+fn test_encore_no_inject_when_port_present() {
+    let result = Framework::Encore.inject_port_flag("encore run --port=4000", 5000);
+    assert_eq!(result, None);
+}
+
+#[test]
+fn test_encore_no_port_env() {
+    assert!(!Framework::Encore.injects_port_env());
 }

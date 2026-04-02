@@ -1,0 +1,453 @@
+#!/usr/bin/env bash
+# ale-state -- Compute project state from authoritative sources on demand
+#
+# Usage:
+#   ale-state all              # Full state (< 5s)
+#   ale-state --cached         # Cached full state (< 50ms, TTL 60s)
+#   ale-state branches         # Branch state only
+#   ale-state agents           # Agent/worktree liveness
+#   ale-state conflicts        # Potential merge conflicts
+#   ale-state thresholds       # Context watchdog thresholds
+#   ale-state events           # Recent events summary
+#   ale-state --summary        # Human-readable summary for agent context injection
+#
+# Queries: git (branches, commits, worktrees), gh (PRs, issues),
+#          ~/.claude/teams/ (heartbeat files), .ale/events/ (recent events).
+#
+# Output: Structured JSON to stdout. Cached at .ale/cache/state-snapshot.json.
+#
+# Design: State is computed, never stored. Git and GitHub are authoritative.
+# Deleting .ale/ is safe -- state rebuilds from authoritative sources.
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+find_ale_dir() {
+  local dir="$PWD"
+  while [ "$dir" != "/" ]; do
+    if [ -d "$dir/.ale" ]; then
+      echo "$dir/.ale"
+      return
+    fi
+    dir="$(dirname "$dir")"
+  done
+  local root
+  root=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+  echo "$root/.ale"
+}
+
+ALE_DIR="${ALE_DIR:-$(find_ale_dir)}"
+CACHE_DIR="$ALE_DIR/cache"
+CACHE_FILE="$CACHE_DIR/state-snapshot.json"
+CACHE_TTL="${ALE_STATE_CACHE_TTL:-60}"  # seconds
+
+TEAMS_DIR="${ALE_TEAMS_DIR:-$HOME/.claude/teams}"
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+now_epoch() {
+  date +%s
+}
+
+# Check if cache is fresh (< TTL seconds old)
+cache_is_fresh() {
+  [ -f "$CACHE_FILE" ] || return 1
+  local mtime
+  if [[ "$(uname)" == "Darwin" ]]; then
+    mtime=$(stat -f %m "$CACHE_FILE" 2>/dev/null || echo 0)
+  else
+    mtime=$(stat -c %Y "$CACHE_FILE" 2>/dev/null || echo 0)
+  fi
+  local age=$(( $(now_epoch) - mtime ))
+  [ "$age" -lt "$CACHE_TTL" ]
+}
+
+# JSON-escape a string (minimal: escape quotes and backslashes)
+json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\t'/\\t}"
+  printf '%s' "$s"
+}
+
+# ---------------------------------------------------------------------------
+# Section: branches
+# ---------------------------------------------------------------------------
+
+compute_branches() {
+  local branches_json="["
+  local first=true
+
+  # Get local branches with last commit info
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    local ref sha date subject
+    ref=$(echo "$line" | cut -d'|' -f1)
+    sha=$(echo "$line" | cut -d'|' -f2)
+    date=$(echo "$line" | cut -d'|' -f3)
+    subject=$(echo "$line" | cut -d'|' -f4-)
+
+    ref=$(json_escape "$ref")
+    subject=$(json_escape "$subject")
+
+    if [ "$first" = true ]; then
+      first=false
+    else
+      branches_json="$branches_json,"
+    fi
+    branches_json="$branches_json{\"name\":\"$ref\",\"sha\":\"${sha:0:8}\",\"date\":\"$date\",\"subject\":\"$subject\"}"
+  done < <(git for-each-ref --sort=-committerdate --format='%(refname:short)|%(objectname:short)|%(committerdate:iso8601)|%(subject)' refs/heads/ 2>/dev/null | head -20)
+
+  branches_json="$branches_json]"
+  echo "$branches_json"
+}
+
+# ---------------------------------------------------------------------------
+# Section: agents (worktrees + heartbeat)
+# ---------------------------------------------------------------------------
+
+compute_agents() {
+  local agents_json="["
+  local first=true
+
+  # List worktrees (skip primary)
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    local wt_path wt_sha wt_branch
+    wt_path=$(echo "$line" | awk '{print $1}')
+    wt_sha=$(echo "$line" | awk '{print $2}')
+    wt_branch=$(echo "$line" | sed 's/.*\[//;s/\].*//' 2>/dev/null || echo "detached")
+
+    [ -d "$wt_path" ] || continue
+
+    # Get last commit time
+    local last_commit_ts
+    last_commit_ts=$(git -C "$wt_path" log -1 --format='%ct' 2>/dev/null || echo "0")
+    local age_s=0
+    if [ "$last_commit_ts" != "0" ]; then
+      age_s=$(( $(now_epoch) - last_commit_ts ))
+    fi
+
+    wt_path=$(json_escape "$wt_path")
+    wt_branch=$(json_escape "$wt_branch")
+
+    if [ "$first" = true ]; then
+      first=false
+    else
+      agents_json="$agents_json,"
+    fi
+    agents_json="$agents_json{\"path\":\"$wt_path\",\"branch\":\"$wt_branch\",\"sha\":\"${wt_sha:0:8}\",\"last_commit_age_s\":$age_s}"
+  done < <(git worktree list 2>/dev/null | tail -n +2)
+
+  # Check heartbeat files for team liveness
+  if [ -d "$TEAMS_DIR" ]; then
+    for dir in "$TEAMS_DIR"/*/; do
+      [ -d "$dir" ] || continue
+      local team
+      team=$(basename "$dir")
+      local hb_file="$dir/heartbeat.json"
+      local status="no-heartbeat"
+      local pid=""
+
+      if [ -f "$hb_file" ]; then
+        # Extract pid via grep/sed -- no python3 dependency, no command injection
+        pid=$(grep -o '"pid"[[:space:]]*:[[:space:]]*[0-9]*' "$hb_file" 2>/dev/null | grep -o '[0-9]*' || echo "")
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+          status="alive"
+        else
+          status="dead"
+        fi
+      fi
+
+      team=$(json_escape "$team")
+
+      if [ "$first" = true ]; then
+        first=false
+      else
+        agents_json="$agents_json,"
+      fi
+      agents_json="$agents_json{\"team\":\"$team\",\"status\":\"$status\",\"pid\":\"${pid:-unknown}\"}"
+    done
+  fi
+
+  agents_json="$agents_json]"
+  echo "$agents_json"
+}
+
+# ---------------------------------------------------------------------------
+# Section: conflicts (branches that may conflict with each other)
+# ---------------------------------------------------------------------------
+
+compute_conflicts() {
+  local conflicts_json="["
+  local first=true
+  local main_ref
+  main_ref=$(git rev-parse --verify origin/main 2>/dev/null || git rev-parse --verify main 2>/dev/null || echo "")
+
+  if [ -z "$main_ref" ]; then
+    echo "[]"
+    return
+  fi
+
+  # Find branches with commits ahead of main
+  while IFS= read -r branch; do
+    [ -z "$branch" ] && continue
+    branch=$(echo "$branch" | sed 's/^[[:space:]]*//')
+    local short="${branch#origin/}"
+
+    # Count commits ahead/behind main
+    local ahead behind
+    ahead=$(git rev-list --count "$main_ref..$branch" 2>/dev/null || echo 0)
+    behind=$(git rev-list --count "$branch..$main_ref" 2>/dev/null || echo 0)
+
+    [ "$ahead" -eq 0 ] && continue
+
+    # Check for file overlap with other active branches (simple heuristic)
+    local changed_files
+    changed_files=$(git diff --name-only "$main_ref...$branch" 2>/dev/null | head -20)
+    local file_count
+    file_count=$(echo "$changed_files" | grep -c . 2>/dev/null || echo 0)
+
+    short=$(json_escape "$short")
+
+    if [ "$first" = true ]; then
+      first=false
+    else
+      conflicts_json="$conflicts_json,"
+    fi
+    conflicts_json="$conflicts_json{\"branch\":\"$short\",\"ahead\":$ahead,\"behind\":$behind,\"files_changed\":$file_count}"
+  done < <(git branch -r --no-merged "$main_ref" 2>/dev/null | grep -vE 'HEAD|->|origin/main$' | head -15)
+
+  conflicts_json="$conflicts_json]"
+  echo "$conflicts_json"
+}
+
+# ---------------------------------------------------------------------------
+# Section: thresholds (context watchdog state)
+# ---------------------------------------------------------------------------
+
+compute_thresholds() {
+  local session_key="${ALE_SESSION_ID:-$PPID}"
+  local state_file="/tmp/ale-watchdog-${session_key}.count"
+  local tool_calls=0
+
+  if [ -f "$state_file" ]; then
+    tool_calls=$(cat "$state_file" 2>/dev/null || echo 0)
+    if ! echo "$tool_calls" | grep -qE '^[0-9]+$'; then
+      tool_calls=0
+    fi
+  fi
+
+  echo "{\"tool_calls\":$tool_calls,\"session\":\"$session_key\"}"
+}
+
+# ---------------------------------------------------------------------------
+# Section: events (recent events summary)
+# ---------------------------------------------------------------------------
+
+compute_events() {
+  local events_dir="$ALE_DIR/events"
+  local events_json="["
+  local first=true
+
+  if [ -d "$events_dir" ]; then
+    # Read last 20 events from today's file (or most recent)
+    local latest_file=""
+    latest_file=$(ls -1 "$events_dir"/*.jsonl 2>/dev/null | sort | tail -1 || true)
+
+    if [ -n "$latest_file" ] && [ -f "$latest_file" ]; then
+      while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        if [ "$first" = true ]; then
+          first=false
+        else
+          events_json="$events_json,"
+        fi
+        events_json="$events_json$line"
+      done < <(tail -20 "$latest_file")
+    fi
+  fi
+
+  events_json="$events_json]"
+  echo "$events_json"
+}
+
+# ---------------------------------------------------------------------------
+# Section: prs (open pull requests from GitHub)
+# ---------------------------------------------------------------------------
+
+compute_prs() {
+  if ! command -v gh >/dev/null 2>&1; then
+    echo "[]"
+    return
+  fi
+
+  # Best-effort: gh may not be authenticated or repo may not be on GitHub
+  local prs
+  prs=$(gh pr list --json number,title,headRefName,state,author --limit 10 2>/dev/null || echo "[]")
+  echo "$prs"
+}
+
+# ---------------------------------------------------------------------------
+# Full state assembly
+# ---------------------------------------------------------------------------
+
+compute_all() {
+  local timestamp
+  timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+  local branches agents conflicts thresholds events prs
+  branches=$(compute_branches)
+  agents=$(compute_agents)
+  conflicts=$(compute_conflicts)
+  thresholds=$(compute_thresholds)
+  events=$(compute_events)
+  prs=$(compute_prs)
+
+  cat <<EOF
+{"timestamp":"$timestamp","branches":$branches,"agents":$agents,"conflicts":$conflicts,"thresholds":$thresholds,"events":$events,"prs":$prs}
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Human-readable summary for agent context injection
+# ---------------------------------------------------------------------------
+
+compute_summary() {
+  local state
+  state=$(compute_all)
+
+  # Use python3 to format JSON into a readable summary
+  echo "$state" | python3 -c "
+import json, sys
+
+try:
+    s = json.load(sys.stdin)
+except:
+    print('ALE State: unavailable (parse error)')
+    sys.exit(0)
+
+lines = []
+lines.append('ALE Project State (computed at {})'.format(s.get('timestamp', 'unknown')))
+lines.append('=' * 50)
+
+# Branches
+branches = s.get('branches', [])
+if branches:
+    lines.append('Active branches: {}'.format(len(branches)))
+    for b in branches[:5]:
+        lines.append('  - {} ({}) {}'.format(b['name'], b['sha'], b.get('subject', '')[:60]))
+    if len(branches) > 5:
+        lines.append('  ... and {} more'.format(len(branches) - 5))
+
+# Agents
+agents = s.get('agents', [])
+worktrees = [a for a in agents if 'path' in a]
+teams = [a for a in agents if 'team' in a]
+if worktrees:
+    lines.append('Worktrees: {}'.format(len(worktrees)))
+    for w in worktrees:
+        age_h = w.get('last_commit_age_s', 0) // 3600
+        lines.append('  - {} on {} ({}h since last commit)'.format(
+            w.get('path', '').split('/')[-1], w.get('branch', '?'), age_h))
+if teams:
+    alive = sum(1 for t in teams if t.get('status') == 'alive')
+    lines.append('Teams: {} alive / {} total'.format(alive, len(teams)))
+    for t in teams:
+        lines.append('  - {} [{}]'.format(t['team'], t['status']))
+
+# Conflicts
+conflicts = s.get('conflicts', [])
+if conflicts:
+    lines.append('Potential conflicts:')
+    for c in conflicts:
+        lines.append('  - {} (+{}/−{}, {} files)'.format(
+            c['branch'], c['ahead'], c['behind'], c['files_changed']))
+
+# PRs
+prs = s.get('prs', [])
+if prs:
+    lines.append('Open PRs: {}'.format(len(prs)))
+    for p in prs[:5]:
+        author = p.get('author', {}).get('login', '?') if isinstance(p.get('author'), dict) else '?'
+        lines.append('  - #{} {} ({})'.format(p['number'], p['title'][:50], author))
+
+# Events
+events = s.get('events', [])
+if events:
+    lines.append('Recent events: {} (latest: {})'.format(
+        len(events), events[-1].get('type', '?')))
+
+print('\\n'.join(lines))
+" 2>/dev/null || echo "ALE State: unavailable"
+}
+
+# ---------------------------------------------------------------------------
+# Cache management
+# ---------------------------------------------------------------------------
+
+write_cache() {
+  local data="$1"
+  mkdir -p "$CACHE_DIR"
+  # Atomic write: temp file + mv ensures readers never see partial data
+  printf '%s\n' "$data" > "$CACHE_FILE.tmp" && mv "$CACHE_FILE.tmp" "$CACHE_FILE"
+}
+
+read_cache() {
+  cat "$CACHE_FILE" 2>/dev/null || echo "{}"
+}
+
+# ---------------------------------------------------------------------------
+# Main dispatch
+# ---------------------------------------------------------------------------
+
+SECTION="${1:-all}"
+
+case "$SECTION" in
+  --cached)
+    if cache_is_fresh; then
+      read_cache
+    else
+      STATE=$(compute_all)
+      write_cache "$STATE"
+      echo "$STATE"
+    fi
+    ;;
+  --summary)
+    compute_summary
+    ;;
+  all)
+    STATE=$(compute_all)
+    write_cache "$STATE"
+    echo "$STATE"
+    ;;
+  branches)
+    compute_branches
+    ;;
+  agents)
+    compute_agents
+    ;;
+  conflicts)
+    compute_conflicts
+    ;;
+  thresholds)
+    compute_thresholds
+    ;;
+  events)
+    compute_events
+    ;;
+  prs)
+    compute_prs
+    ;;
+  *)
+    echo "Usage: ale-state {all|--cached|--summary|branches|agents|conflicts|thresholds|events|prs}" >&2
+    exit 1
+    ;;
+esac

@@ -24,9 +24,6 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact: devx-darwin-arm64
-          - target: x86_64-apple-darwin
-            os: macos-13
-            artifact: devx-darwin-x86_64
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             artifact: devx-linux-x86_64
@@ -78,7 +75,6 @@ jobs:
         with:
           files: |
             devx-darwin-arm64/devx-darwin-arm64.tar.gz
-            devx-darwin-x86_64/devx-darwin-x86_64.tar.gz
             devx-linux-x86_64/devx-linux-x86_64.tar.gz
             devx-linux-arm64/devx-linux-arm64.tar.gz
           generate_release_notes: true

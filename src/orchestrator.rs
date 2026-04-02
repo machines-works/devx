@@ -1,28 +1,31 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
 use notify::RecursiveMode;
-use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
+use notify_debouncer_mini::{DebouncedEventKind, new_debouncer};
 use tokio::sync::mpsc;
 
-use crate::config::DevxConfig;
+use crate::config::{DevxConfig, ServiceConfig};
+use crate::control;
 use crate::deps;
+use crate::detect::Framework;
 use crate::events::DevxEvent;
 use crate::git;
 use crate::infra;
-use crate::ports::{PortAllocator, PortAllocation};
+use crate::ports::{PortAllocation, PortAllocator};
 use crate::process::ManagedProcess;
 use crate::proxy::{ServiceProxy, VhostProxy};
 use crate::tls;
-use crate::control;
 use crate::watcher;
 
 pub enum OrchestratorCommand {
-    Restart { service: String },
+    Restart {
+        service: String,
+    },
     ReloadConfig,
     Shutdown,
     Status {
@@ -39,6 +42,8 @@ pub struct Orchestrator {
     /// Shared atomic targets so proxy tasks pick up new ports after restart
     proxy_targets: HashMap<String, Arc<AtomicU16>>,
     allocator: PortAllocator,
+    /// Tracks services currently being restarted to drop duplicate FileChanged events
+    restarting: HashSet<String>,
     event_tx: mpsc::Sender<DevxEvent>,
     cmd_tx: mpsc::Sender<OrchestratorCommand>,
     cmd_rx: Option<mpsc::Receiver<OrchestratorCommand>>,
@@ -59,6 +64,7 @@ impl Orchestrator {
             proxy_ports: HashMap::new(),
             proxy_targets: HashMap::new(),
             allocator: PortAllocator::new(),
+            restarting: HashSet::new(),
             event_tx,
             cmd_tx,
             cmd_rx: Some(cmd_rx),
@@ -67,6 +73,19 @@ impl Orchestrator {
 
     pub fn cmd_sender(&self) -> mpsc::Sender<OrchestratorCommand> {
         self.cmd_tx.clone()
+    }
+
+    /// A service is self-managed if `managed = false` in config, or if the
+    /// framework auto-detects as self-managed (e.g., Encore).
+    fn is_self_managed(&self, _name: &str, svc: &ServiceConfig) -> bool {
+        if !svc.managed {
+            return true;
+        }
+        let work_dir = match &svc.dir {
+            Some(dir) => self.project_root.join(dir),
+            None => self.project_root.clone(),
+        };
+        Framework::detect(&svc.cmd, &work_dir).self_managed()
     }
 
     fn dep_graph(&self) -> HashMap<String, Vec<String>> {
@@ -98,15 +117,25 @@ impl Orchestrator {
                     .get(name)
                     .ok_or_else(|| anyhow::anyhow!("service '{}' not found in config", name))?;
 
-                if let Some(preferred_port) = svc.port {
-                    // Service has a port: allocate_any for the service, preferred for proxy
+                if self.is_self_managed(name, svc) {
+                    // Self-managed: service owns its port. Use preferred as actual.
+                    if let Some(preferred_port) = svc.port {
+                        self.actual_ports.insert(name.clone(), preferred_port);
+                        // No separate proxy needed — actual == preferred
+                    } else {
+                        // Self-managed with no port: allocate one (rare, but safe)
+                        let alloc = self.allocator.allocate_any(name)?;
+                        self.actual_ports.insert(name.clone(), alloc.actual);
+                    }
+                } else if let Some(preferred_port) = svc.port {
+                    // Managed service with a port: random actual + proxy on preferred
                     let service_alloc = self.allocator.allocate_any(name)?;
                     self.actual_ports.insert(name.clone(), service_alloc.actual);
 
                     let proxy_alloc = self.allocator.allocate(name, preferred_port)?;
                     self.proxy_ports.insert(name.clone(), proxy_alloc.actual);
                 } else {
-                    // No port: allocate_any, no proxy
+                    // Managed, no port: allocate_any, no proxy
                     let service_alloc = self.allocator.allocate_any(name)?;
                     self.actual_ports.insert(name.clone(), service_alloc.actual);
                 }
@@ -120,7 +149,10 @@ impl Orchestrator {
                 Err(e) => {
                     let _ = self.event_tx.try_send(DevxEvent::LogLine {
                         service: "devx".to_string(),
-                        line: format!("[tls] failed to generate certs, falling back to HTTP: {}", e),
+                        line: format!(
+                            "[tls] failed to generate certs, falling back to HTTP: {}",
+                            e
+                        ),
                         is_stderr: true,
                     });
                     None
@@ -138,11 +170,13 @@ impl Orchestrator {
                 .or_insert_with(|| Arc::new(AtomicU16::new(actual_port)));
         }
 
+        // Only set up per-port proxies for managed services (self-managed
+        // services don't need a proxy — their actual port IS the preferred port).
         let proxy_services: Vec<(String, u16, Arc<AtomicU16>)> = self
             .config
             .services
             .iter()
-            .filter(|(_, svc)| svc.port.is_some())
+            .filter(|(name, svc)| svc.port.is_some() && !self.is_self_managed(name, svc))
             .filter_map(|(name, _)| {
                 let proxy_port = self.proxy_ports.get(name).copied()?;
                 let atomic_target = self.proxy_targets.get(name).cloned()?;
@@ -224,12 +258,17 @@ impl Orchestrator {
 
         for wave in &waves {
             for name in wave {
-                let svc = self.config.services.get(name)
+                let svc = self
+                    .config
+                    .services
+                    .get(name)
                     .ok_or_else(|| anyhow::anyhow!("service '{}' not found in config", name))?
                     .clone();
                 let port_alloc = PortAllocation {
                     preferred: svc.port,
-                    actual: *self.actual_ports.get(name)
+                    actual: *self
+                        .actual_ports
+                        .get(name)
                         .ok_or_else(|| anyhow::anyhow!("no port allocated for '{}'", name))?,
                     remapped: false,
                 };
@@ -255,18 +294,15 @@ impl Orchestrator {
                 Some(dir) => self.project_root.join(dir),
                 None => self.project_root.clone(),
             };
-            if watch_dir.is_dir() {
-                if let Err(e) = watcher::start_watcher(
-                    name.clone(),
-                    watch_dir,
-                    self.event_tx.clone(),
-                ) {
-                    let _ = self.event_tx.try_send(DevxEvent::LogLine {
-                        service: "devx".to_string(),
-                        line: format!("[watch] failed to watch {}: {}", name, e),
-                        is_stderr: true,
-                    });
-                }
+            if watch_dir.is_dir()
+                && let Err(e) =
+                    watcher::start_watcher(name.clone(), watch_dir, self.event_tx.clone())
+            {
+                let _ = self.event_tx.try_send(DevxEvent::LogLine {
+                    service: "devx".to_string(),
+                    line: format!("[watch] failed to watch {}: {}", name, e),
+                    is_stderr: true,
+                });
             }
         }
 
@@ -279,7 +315,10 @@ impl Orchestrator {
             let watch_result = (|| -> notify::Result<()> {
                 let mut debouncer = new_debouncer(
                     Duration::from_millis(500),
-                    move |result: Result<Vec<notify_debouncer_mini::DebouncedEvent>, notify::Error>| {
+                    move |result: Result<
+                        Vec<notify_debouncer_mini::DebouncedEvent>,
+                        notify::Error,
+                    >| {
                         let events = match result {
                             Ok(events) => events,
                             Err(_) => return,
@@ -293,7 +332,9 @@ impl Orchestrator {
                         }
                     },
                 )?;
-                debouncer.watcher().watch(&config_dir, RecursiveMode::NonRecursive)?;
+                debouncer
+                    .watcher()
+                    .watch(&config_dir, RecursiveMode::NonRecursive)?;
                 std::mem::forget(debouncer);
                 Ok(())
             })();
@@ -336,6 +377,10 @@ impl Orchestrator {
         while let Some(cmd) = cmd_rx.recv().await {
             match cmd {
                 OrchestratorCommand::Restart { service } => {
+                    if self.restarting.contains(&service) {
+                        continue;
+                    }
+                    self.restarting.insert(service.clone());
                     if let Err(e) = self.restart(&service).await {
                         let _ = self.event_tx.try_send(DevxEvent::LogLine {
                             service: "devx".to_string(),
@@ -343,6 +388,7 @@ impl Orchestrator {
                             is_stderr: true,
                         });
                     }
+                    self.restarting.remove(&service);
                 }
                 OrchestratorCommand::ReloadConfig => {
                     let config_path = self.project_root.join("devx.toml");
@@ -425,18 +471,26 @@ impl Orchestrator {
             .ok_or_else(|| anyhow::anyhow!("service '{}' not found", name))?
             .clone();
 
-        // Re-allocate port (reuses the session allocator to avoid collisions)
-        let service_alloc = self.allocator.allocate_any(name)?;
-        self.actual_ports.insert(name.to_string(), service_alloc.actual);
+        let actual_port = if self.is_self_managed(name, &svc) {
+            // Self-managed: reuse the same port (service owns it)
+            svc.port
+                .unwrap_or_else(|| *self.actual_ports.get(name).unwrap_or(&0))
+        } else {
+            // Managed: re-allocate a fresh port
+            let service_alloc = self.allocator.allocate_any(name)?;
+            service_alloc.actual
+        };
+
+        self.actual_ports.insert(name.to_string(), actual_port);
 
         // Update shared atomic so proxies (ServiceProxy + VhostProxy) forward to the new port
         if let Some(atomic_target) = self.proxy_targets.get(name) {
-            atomic_target.store(service_alloc.actual, Ordering::Relaxed);
+            atomic_target.store(actual_port, Ordering::Relaxed);
         }
 
         let port_alloc = PortAllocation {
             preferred: svc.port,
-            actual: service_alloc.actual,
+            actual: actual_port,
             remapped: false,
         };
 
@@ -486,7 +540,14 @@ impl Orchestrator {
             };
 
             // Allocate ports
-            if let Some(preferred_port) = svc.port {
+            if self.is_self_managed(name, &svc) {
+                if let Some(preferred_port) = svc.port {
+                    self.actual_ports.insert(name.clone(), preferred_port);
+                } else {
+                    let alloc = self.allocator.allocate_any(name)?;
+                    self.actual_ports.insert(name.clone(), alloc.actual);
+                }
+            } else if let Some(preferred_port) = svc.port {
                 let service_alloc = self.allocator.allocate_any(name)?;
                 self.actual_ports.insert(name.clone(), service_alloc.actual);
                 let proxy_alloc = self.allocator.allocate(name, preferred_port)?;
@@ -498,7 +559,9 @@ impl Orchestrator {
 
             let port_alloc = PortAllocation {
                 preferred: svc.port,
-                actual: *self.actual_ports.get(name)
+                actual: *self
+                    .actual_ports
+                    .get(name)
                     .ok_or_else(|| anyhow::anyhow!("no port allocated for '{}'", name))?,
                 remapped: false,
             };
@@ -512,6 +575,26 @@ impl Orchestrator {
             )
             .await?;
             self.processes.insert(name.clone(), proc);
+
+            // Start file watcher for newly added service if watch is enabled
+            if let Some(svc) = self.config.services.get(name)
+                && svc.watch
+            {
+                let watch_dir = match &svc.dir {
+                    Some(dir) => self.project_root.join(dir),
+                    None => self.project_root.clone(),
+                };
+                if watch_dir.is_dir()
+                    && let Err(e) =
+                        watcher::start_watcher(name.clone(), watch_dir, self.event_tx.clone())
+                {
+                    let _ = self.event_tx.try_send(DevxEvent::LogLine {
+                        service: "devx".to_string(),
+                        line: format!("[watch] failed to watch {}: {}", name, e),
+                        is_stderr: true,
+                    });
+                }
+            }
         }
 
         let _ = self.event_tx.try_send(DevxEvent::ConfigReloaded { diff });

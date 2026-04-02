@@ -77,7 +77,9 @@ async fn handle_connection(
             }
             "status" => {
                 let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-                let _ = cmd_tx.send(OrchestratorCommand::Status { reply: reply_tx }).await;
+                let _ = cmd_tx
+                    .send(OrchestratorCommand::Status { reply: reply_tx })
+                    .await;
                 match reply_rx.await {
                     Ok(status_json) => status_json,
                     Err(_) => r#"{"error":"status channel closed"}"#.to_string(),

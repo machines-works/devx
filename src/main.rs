@@ -3,7 +3,7 @@ use std::io::{BufRead, Seek, Write};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use tokio::sync::mpsc;
 
@@ -100,7 +100,11 @@ fn load_project_config() -> Result<(PathBuf, DevxConfig)> {
 }
 
 fn service_filter(services: Vec<String>) -> Option<Vec<String>> {
-    if services.is_empty() { None } else { Some(services) }
+    if services.is_empty() {
+        None
+    } else {
+        Some(services)
+    }
 }
 
 fn cmd_up(daemon_mode: bool, services: Vec<String>) -> Result<()> {
@@ -265,7 +269,11 @@ fn write_event_to_log(log_file: &mut std::fs::File, event: &DevxEvent) {
 
     let ts = daemon::format_timestamp(SystemTime::now());
     match event {
-        DevxEvent::LogLine { service, line, is_stderr } => {
+        DevxEvent::LogLine {
+            service,
+            line,
+            is_stderr,
+        } => {
             if *is_stderr {
                 let _ = writeln!(log_file, "[{}] [{}] [stderr] {}", ts, service, line);
             } else {
@@ -275,23 +283,48 @@ fn write_event_to_log(log_file: &mut std::fs::File, event: &DevxEvent) {
         DevxEvent::StateChange { service, state, .. } => {
             let _ = writeln!(log_file, "[{}] [{}] state: {}", ts, service, state.label());
         }
-        DevxEvent::ProxyBound { service, proxy_port, target_port } => {
-            let _ = writeln!(log_file, "[{}] [{}] proxy :{} -> :{}", ts, service, proxy_port, target_port);
+        DevxEvent::ProxyBound {
+            service,
+            proxy_port,
+            target_port,
+        } => {
+            let _ = writeln!(
+                log_file,
+                "[{}] [{}] proxy :{} -> :{}",
+                ts, service, proxy_port, target_port
+            );
         }
         DevxEvent::VhostBound { port, domains, tls } => {
             let domain_list: Vec<&str> = domains.iter().map(|(d, _)| d.as_str()).collect();
             let proto = if *tls { "https" } else { "http" };
-            let _ = writeln!(log_file, "[{}] [devx] vhost {} :{} domains: {}", ts, proto, port, domain_list.join(", "));
+            let _ = writeln!(
+                log_file,
+                "[{}] [devx] vhost {} :{} domains: {}",
+                ts,
+                proto,
+                port,
+                domain_list.join(", ")
+            );
         }
         DevxEvent::FileChanged { service } => {
             let _ = writeln!(log_file, "[{}] [{}] file changed, restarting", ts, service);
         }
         DevxEvent::ConfigReloaded { diff } => {
             let mut parts = Vec::new();
-            for name in &diff.added { parts.push(format!("added {}", name)); }
-            for name in &diff.removed { parts.push(format!("removed {}", name)); }
-            for name in &diff.changed { parts.push(format!("changed {}", name)); }
-            let summary = if parts.is_empty() { "no changes".to_string() } else { parts.join(", ") };
+            for name in &diff.added {
+                parts.push(format!("added {}", name));
+            }
+            for name in &diff.removed {
+                parts.push(format!("removed {}", name));
+            }
+            for name in &diff.changed {
+                parts.push(format!("changed {}", name));
+            }
+            let summary = if parts.is_empty() {
+                "no changes".to_string()
+            } else {
+                parts.join(", ")
+            };
             let _ = writeln!(log_file, "[{}] [devx] config reloaded: {}", ts, summary);
         }
         DevxEvent::AllStarted => {
@@ -391,8 +424,8 @@ fn cmd_status() -> Result<()> {
     // Print service table
     if let Some(services) = status.get("services").and_then(|s| s.as_array()) {
         println!(
-            "{:<20} {:<12} {:<8} {:<12} {}",
-            "SERVICE", "STATE", "PORT", "PROXY", "UPTIME"
+            "{:<20} {:<12} {:<8} {:<12} UPTIME",
+            "SERVICE", "STATE", "PORT", "PROXY"
         );
         println!("{}", "-".repeat(60));
 
@@ -415,7 +448,10 @@ fn cmd_status() -> Result<()> {
                 .map(format_uptime)
                 .unwrap_or_else(|| "-".to_string());
 
-            println!("{:<20} {:<12} {:<8} {:<12} {}", name, state, port, proxy_port, uptime);
+            println!(
+                "{:<20} {:<12} {:<8} {:<12} {}",
+                name, state, port, proxy_port, uptime
+            );
         }
     }
 
@@ -446,9 +482,8 @@ fn cmd_logs(follow: bool, service_filter: Option<String>, lines: usize) -> Resul
     }
 
     let filter_pattern = service_filter.as_ref().map(|svc| format!("[{}]", svc));
-    let matches_filter = |line: &str| -> bool {
-        filter_pattern.as_ref().map_or(true, |p| line.contains(p))
-    };
+    let matches_filter =
+        |line: &str| -> bool { filter_pattern.as_ref().is_none_or(|p| line.contains(p)) };
 
     // Stream through file keeping only the last N matching lines (avoids loading entire file)
     let file = std::fs::File::open(&log_file_path)?;

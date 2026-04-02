@@ -25,12 +25,7 @@ fn state_color(state: &ServiceState) -> Color {
     }
 }
 
-pub fn render_status(
-    frame: &mut Frame,
-    area: Rect,
-    services: &[ServiceInfo],
-    selected: usize,
-) {
+pub fn render_status(frame: &mut Frame, area: Rect, services: &[ServiceInfo], selected: usize) {
     let header_style = Style::default()
         .fg(Color::DarkGray)
         .add_modifier(Modifier::BOLD);
@@ -51,14 +46,8 @@ pub fn render_status(
             let color = state_color(&svc.state);
             let status_text = format!("{} {}", svc.state.symbol(), svc.state.label());
             let domain_text = svc.domain.clone().unwrap_or_default();
-            let port_text = svc
-                .actual_port
-                .map(|p| p.to_string())
-                .unwrap_or_default();
-            let proxy_text = svc
-                .proxy_port
-                .map(|p| p.to_string())
-                .unwrap_or_default();
+            let port_text = svc.actual_port.map(|p| p.to_string()).unwrap_or_default();
+            let proxy_text = svc.proxy_port.map(|p| p.to_string()).unwrap_or_default();
             let uptime_text = svc.uptime.clone().unwrap_or_default();
 
             let row_style = if i == selected {

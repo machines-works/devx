@@ -132,6 +132,101 @@
       display: inline-block;
       text-shadow: 0 0 20px rgba(168, 85, 247, 0.2);
       letter-spacing: 0.05em;
+      position: relative;
+      animation: glitch-trigger 8s infinite;
+    }
+
+    /* ── Glitch effect ── */
+    .hero-ascii::before,
+    .hero-ascii::after {
+      content: attr(data-text);
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      opacity: 0;
+    }
+    .hero-ascii::before {
+      color: var(--neon-cyan);
+      text-shadow: none;
+      animation: glitch-cyan 8s infinite;
+    }
+    .hero-ascii::after {
+      color: var(--neon-pink);
+      text-shadow: none;
+      animation: glitch-pink 8s infinite;
+    }
+
+    /* First burst: big & aggressive (0-6%), repeats: subtler (50-53%) */
+    @keyframes glitch-trigger {
+      0%        { transform: none; }
+      1%        { transform: skewX(-6deg) translateX(8px); }
+      1.5%      { transform: skewX(8deg) translateX(-6px); }
+      2%        { transform: translateX(10px) skewX(-3deg); }
+      2.3%      { transform: none; }
+      2.5%      { transform: skewX(5deg) translateX(-8px); }
+      3%        { transform: translateX(6px); }
+      3.2%      { transform: skewX(-7deg) translateX(-4px); }
+      3.5%      { transform: none; }
+      3.8%      { transform: translateX(5px) skewX(4deg); }
+      4%        { transform: skewX(-3deg) translateX(-10px); }
+      4.5%      { transform: translateX(3px); }
+      5%        { transform: none; }
+      50%       { transform: none; }
+      50.5%     { transform: skewX(-2deg) translateX(3px); }
+      51%       { transform: skewX(3deg) translateX(-2px); }
+      51.5%     { transform: none; }
+      52%       { transform: translateX(-3px); }
+      52.5%     { transform: none; }
+      100%      { transform: none; }
+    }
+
+    @keyframes glitch-cyan {
+      0%        { opacity: 0; clip-path: inset(0 0 100% 0); }
+      1%        { opacity: 1; clip-path: inset(15% 0 55% 0); transform: translateX(-10px); }
+      1.5%      { opacity: 0.9; clip-path: inset(60% 0 5% 0); transform: translateX(8px); }
+      2%        { opacity: 1; clip-path: inset(5% 0 75% 0); transform: translateX(-12px); }
+      2.3%      { opacity: 0; }
+      2.5%      { opacity: 0.9; clip-path: inset(30% 0 40% 0); transform: translateX(-8px); }
+      3%        { opacity: 1; clip-path: inset(70% 0 5% 0); transform: translateX(6px); }
+      3.2%      { opacity: 0.8; clip-path: inset(10% 0 60% 0); transform: translateX(-10px); }
+      3.5%      { opacity: 0; }
+      3.8%      { opacity: 0.9; clip-path: inset(45% 0 25% 0); transform: translateX(-7px); }
+      4%        { opacity: 1; clip-path: inset(80% 0 0% 0); transform: translateX(9px); }
+      4.5%      { opacity: 0.7; clip-path: inset(20% 0 50% 0); transform: translateX(-5px); }
+      5%        { opacity: 0; clip-path: inset(0 0 100% 0); }
+      50%       { opacity: 0; }
+      50.5%     { opacity: 0.7; clip-path: inset(25% 0 55% 0); transform: translateX(-4px); }
+      51%       { opacity: 0.5; clip-path: inset(60% 0 20% 0); transform: translateX(3px); }
+      51.5%     { opacity: 0; }
+      52%       { opacity: 0.6; clip-path: inset(15% 0 65% 0); transform: translateX(-3px); }
+      52.5%     { opacity: 0; }
+      100%      { opacity: 0; }
+    }
+
+    @keyframes glitch-pink {
+      0%        { opacity: 0; clip-path: inset(0 0 100% 0); }
+      1%        { opacity: 0.9; clip-path: inset(40% 0 25% 0); transform: translateX(10px); }
+      1.5%      { opacity: 1; clip-path: inset(5% 0 70% 0); transform: translateX(-7px); }
+      2%        { opacity: 0.9; clip-path: inset(50% 0 20% 0); transform: translateX(12px); }
+      2.3%      { opacity: 0; }
+      2.5%      { opacity: 1; clip-path: inset(65% 0 10% 0); transform: translateX(9px); }
+      3%        { opacity: 0.8; clip-path: inset(20% 0 50% 0); transform: translateX(-6px); }
+      3.2%      { opacity: 0.9; clip-path: inset(75% 0 0% 0); transform: translateX(8px); }
+      3.5%      { opacity: 0; }
+      3.8%      { opacity: 0.8; clip-path: inset(10% 0 65% 0); transform: translateX(7px); }
+      4%        { opacity: 1; clip-path: inset(35% 0 35% 0); transform: translateX(-9px); }
+      4.5%      { opacity: 0.6; clip-path: inset(55% 0 20% 0); transform: translateX(5px); }
+      5%        { opacity: 0; clip-path: inset(0 0 100% 0); }
+      50%       { opacity: 0; }
+      50.5%     { opacity: 0.5; clip-path: inset(50% 0 30% 0); transform: translateX(4px); }
+      51%       { opacity: 0.6; clip-path: inset(10% 0 70% 0); transform: translateX(-3px); }
+      51.5%     { opacity: 0; }
+      52%       { opacity: 0.5; clip-path: inset(40% 0 40% 0); transform: translateX(3px); }
+      52.5%     { opacity: 0; }
+      100%      { opacity: 0; }
     }
 
     .hero-tagline {
@@ -392,13 +487,18 @@
       <span class="nav-logo"><span class="nav-logo-ascii">▓█▀▀▄ ▓█  ▄▀
 ▓█  ▀█▓█▀▄
 ▓█▄▄▀ ▓█ ▀▄</span></span>
-      <span class="nav-badge">COMING SOON</span>
+      <span class="nav-badge">ALPHA v0.0.1</span>
     </div>
   </nav>
 
   <section class="hero">
     <div class="container">
-      <pre class="hero-ascii">
+      <pre class="hero-ascii" data-text=" ██████╗  ███████╗██╗   ██╗██╗  ██╗
+ ██╔══██╗ ██╔════╝██║   ██║╚██╗██╔╝
+ ██║  ██║ █████╗  ██║   ██║ ╚███╔╝
+ ██║  ██║ ██╔══╝  ╚██╗ ██╔╝ ██╔██╗
+ ██████╔╝ ███████╗ ╚████╔╝ ██╔╝ ██╗
+ ╚═════╝  ╚══════╝  ╚═══╝  ╚═╝  ╚═╝">
  ██████╗  ███████╗██╗   ██╗██╗  ██╗
  ██╔══██╗ ██╔════╝██║   ██║╚██╗██╔╝
  ██║  ██║ █████╗  ██║   ██║ ╚███╔╝
@@ -468,9 +568,9 @@
       <p class="cta-label">// install</p>
       <h2 class="cta-heading">Try it now</h2>
       <p class="cta-sub">macOS &amp; Linux. One command.</p>
-      <div class="install-block" onclick="navigator.clipboard.writeText('curl -fsSL https://devx.machines.works/install.sh | sh')">
+      <div class="install-block" id="install-copy">
         <code>curl -fsSL https://devx.machines.works/install.sh | sh</code>
-        <span class="install-hint">click to copy</span>
+        <span class="install-hint" id="copy-hint">click to copy</span>
       </div>
       <p class="cta-sub">Feedback and war stories welcome.</p>
       <a class="btn-wa" href="https://wa.me/5521993438353" target="_blank" rel="noopener noreferrer">
@@ -485,6 +585,32 @@
       <span>Part of the <a href="https://sharpi.dev" target="_blank" rel="noopener noreferrer">Sharpi</a> ecosystem</span>
     </div>
   </footer>
+
+  <script>
+    document.getElementById('install-copy').addEventListener('click', function() {
+      var cmd = 'curl -fsSL https://devx.machines.works/install.sh | sh';
+      var hint = document.getElementById('copy-hint');
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(cmd).then(function() {
+          hint.textContent = 'copied!';
+          hint.style.color = '#34d399';
+          setTimeout(function() { hint.textContent = 'click to copy'; hint.style.color = ''; }, 2000);
+        });
+      } else {
+        var ta = document.createElement('textarea');
+        ta.value = cmd;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        hint.textContent = 'copied!';
+        hint.style.color = '#34d399';
+        setTimeout(function() { hint.textContent = 'click to copy'; hint.style.color = ''; }, 2000);
+      }
+    });
+  </script>
 
 </body>
 </html>

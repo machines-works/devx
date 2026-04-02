@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU16, Ordering};
 
 use crate::events::DevxEvent;
 use anyhow::Result;
@@ -260,7 +260,12 @@ async fn forward_to(
     let is_upgrade = req
         .headers()
         .get(hyper::header::UPGRADE)
-        .map(|v| v.to_str().unwrap_or("").to_lowercase().contains("websocket"))
+        .map(|v| {
+            v.to_str()
+                .unwrap_or("")
+                .to_lowercase()
+                .contains("websocket")
+        })
         .unwrap_or(false);
 
     let target_addr = format!("127.0.0.1:{}", target_port);

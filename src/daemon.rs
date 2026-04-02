@@ -2,7 +2,7 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 /// Returns the PID file path for a given project name.
 pub fn pid_path(project_name: &str) -> PathBuf {

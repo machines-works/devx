@@ -4,19 +4,19 @@ use std::time::Instant;
 use anyhow::Result;
 use crossterm::event::{self, Event};
 use ratatui::DefaultTerminal;
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Style};
 use ratatui::text::Span;
 use ratatui::widgets::Paragraph;
-use ratatui::Frame;
 use tokio::sync::mpsc;
 
 use crate::config::ConfigDiff;
 use crate::events::{DevxEvent, ServiceState};
 use crate::orchestrator::OrchestratorCommand;
-use crate::tui::keys::{handle_key, Action};
-use crate::tui::logs::{service_color, LogEntry};
-use crate::tui::status::{render_status, ServiceInfo};
+use crate::tui::keys::{Action, handle_key};
+use crate::tui::logs::{LogEntry, service_color};
+use crate::tui::status::{ServiceInfo, render_status};
 
 pub struct App {
     project_name: String,
@@ -108,19 +108,24 @@ impl App {
                             .cloned()
                             .unwrap_or_default();
                         if !name.is_empty() {
-                            let _ = self.cmd_tx.try_send(OrchestratorCommand::Restart {
-                                service: name,
-                            });
+                            let _ = self
+                                .cmd_tx
+                                .try_send(OrchestratorCommand::Restart { service: name });
                         }
                     }
-                    Action::Filter => {
+                    Action::ToggleFilter => {
                         let name = self
                             .service_names
                             .get(self.selected_service)
                             .cloned()
                             .unwrap_or_default();
                         if !name.is_empty() {
-                            self.filter = Some(name);
+                            if self.filter.as_deref() == Some(&name) {
+                                // Already filtering this service — toggle off
+                                self.filter = None;
+                            } else {
+                                self.filter = Some(name);
+                            }
                             self.scroll_offset = 0;
                         }
                     }
@@ -133,6 +138,15 @@ impl App {
                     }
                     Action::ScrollDown => {
                         self.scroll_offset = self.scroll_offset.saturating_sub(1);
+                    }
+                    Action::PrevService => {
+                        if !self.service_names.is_empty() {
+                            self.selected_service = if self.selected_service == 0 {
+                                self.service_names.len() - 1
+                            } else {
+                                self.selected_service - 1
+                            };
+                        }
                     }
                     Action::NextService => {
                         if !self.service_names.is_empty() {
@@ -208,7 +222,9 @@ impl App {
                     is_stderr: false,
                     color,
                 });
-                let _ = self.cmd_tx.try_send(OrchestratorCommand::Restart { service });
+                let _ = self
+                    .cmd_tx
+                    .try_send(OrchestratorCommand::Restart { service });
             }
             DevxEvent::ConfigReloaded { diff } => {
                 self.handle_config_reloaded(diff);
@@ -218,7 +234,9 @@ impl App {
                 self.should_quit = true;
             }
             DevxEvent::ControlRestart { service } => {
-                let _ = self.cmd_tx.try_send(OrchestratorCommand::Restart { service });
+                let _ = self
+                    .cmd_tx
+                    .try_send(OrchestratorCommand::Restart { service });
             }
         }
     }
@@ -230,10 +248,8 @@ impl App {
         }
         for name in &diff.added {
             parts.push(format!("added {}", name));
-            self.service_colors.insert(
-                name.clone(),
-                service_color(self.service_names.len()),
-            );
+            self.service_colors
+                .insert(name.clone(), service_color(self.service_names.len()));
             self.service_names.push(name.clone());
         }
         for name in &diff.removed {
@@ -333,7 +349,7 @@ impl App {
         );
 
         // Help bar
-        let help = " q quit  r restart  f filter  esc clear  tab next  ↑↓ scroll";
+        let help = " q quit  r restart  ↑↓ select  enter/f filter  esc all  shift+↑↓ scroll";
         frame.render_widget(
             Paragraph::new(Span::styled(help, Style::default().fg(Color::DarkGray))),
             areas[3],

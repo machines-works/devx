@@ -63,15 +63,19 @@ pub fn branch_domain(domain: &str) -> Option<String> {
     let sanitized = branch
         .to_lowercase()
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect::<String>();
     Some(format!("{}.{}", sanitized, domain))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn branch_domain_returns_none_for_main() {
         // We can't easily mock git, but we can test the sanitization logic directly
@@ -79,7 +83,13 @@ mod tests {
         let sanitized = "fix-auth"
             .to_lowercase()
             .chars()
-            .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '-' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' {
+                    c
+                } else {
+                    '-'
+                }
+            })
             .collect::<String>();
         assert_eq!(
             format!("{}.{}", sanitized, "api.localhost"),
@@ -93,7 +103,13 @@ mod tests {
         let sanitized = branch
             .to_lowercase()
             .chars()
-            .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '-' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' {
+                    c
+                } else {
+                    '-'
+                }
+            })
             .collect::<String>();
         assert_eq!(sanitized, "feat-my-feature");
         assert_eq!(

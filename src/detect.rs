@@ -12,6 +12,8 @@ pub enum Framework {
     Go,
     /// Python (uvicorn/gunicorn) — uses --port flag
     Python,
+    /// Encore — uses --port flag
+    Encore,
     /// Unknown — don't inject anything
     Unknown,
 }
@@ -20,6 +22,9 @@ impl Framework {
     /// Detect framework from the command string and working directory.
     pub fn detect(cmd: &str, work_dir: &Path) -> Self {
         // Check command patterns
+        if cmd.contains("encore") {
+            return Framework::Encore;
+        }
         if cmd.contains("vite") || cmd.contains("astro") {
             return Framework::Vite;
         }
@@ -72,6 +77,7 @@ impl Framework {
                     None
                 }
             }
+            Framework::Encore => Some(format!("{} --port={}", cmd, port)),
             // NextJs, Node, Go use PORT env var — handled by process.rs env injection
             Framework::NextJs | Framework::Node | Framework::Go | Framework::Unknown => None,
         }
@@ -80,5 +86,12 @@ impl Framework {
     /// Should we inject PORT as an env var?
     pub fn injects_port_env(&self) -> bool {
         matches!(self, Framework::NextJs | Framework::Node)
+    }
+
+    /// Does this framework manage its own port? If true, devx should not
+    /// allocate a random port — the service will bind to its configured port.
+    pub fn self_managed(&self) -> bool {
+        false // No auto-detected frameworks are self-managed currently.
+        // The `managed = false` config flag handles truly unmanageable services.
     }
 }

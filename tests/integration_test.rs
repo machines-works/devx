@@ -165,7 +165,9 @@ fn cleanup_project(project_name: &str) {
     }
     if let Ok(pid_str) = fs::read_to_string(pid_path(project_name)) {
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
-            unsafe { libc::kill(pid, libc::SIGKILL); }
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
             thread::sleep(Duration::from_millis(200));
         }
     }
@@ -253,7 +255,10 @@ fn check_two_services() {
 fn check_invalid_config_missing_cmd() {
     let p = TestProject::new(&invalid_toml(&unique_name("check-invalid")));
     let out = p.devx().args(["check"]).output().unwrap();
-    assert!(!out.status.success(), "devx check should fail for invalid config");
+    assert!(
+        !out.status.success(),
+        "devx check should fail for invalid config"
+    );
 }
 
 #[test]
@@ -307,9 +312,15 @@ fn daemon_start_creates_pid_and_socket() {
     assert!(log_path(&p.name).exists(), "log file should exist");
 
     let pid_str = fs::read_to_string(pid_path(&p.name)).unwrap();
-    let pid: u32 = pid_str.trim().parse().expect("PID file should contain a number");
+    let pid: u32 = pid_str
+        .trim()
+        .parse()
+        .expect("PID file should contain a number");
     assert!(pid > 0);
-    assert!(unsafe { libc::kill(pid as i32, 0) == 0 }, "daemon should be alive");
+    assert!(
+        unsafe { libc::kill(pid as i32, 0) == 0 },
+        "daemon should be alive"
+    );
 }
 
 #[test]
@@ -328,9 +339,11 @@ fn daemon_down_stops_and_cleans_up() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("devx stopped"));
 
-    let exited = wait_for(Duration::from_secs(5), Duration::from_millis(100), || {
-        unsafe { libc::kill(pid, 0) != 0 }
-    });
+    let exited = wait_for(
+        Duration::from_secs(5),
+        Duration::from_millis(100),
+        || unsafe { libc::kill(pid, 0) != 0 },
+    );
     assert!(exited, "daemon process should have exited");
     assert!(!pid_path(&p.name).exists(), "PID file should be removed");
     assert!(!socket_path(&p.name).exists(), "socket should be removed");
@@ -347,7 +360,11 @@ fn daemon_prevents_double_start() {
     let out = p.devx().args(["up", "-d"]).output().unwrap();
     assert!(!out.status.success(), "second start should fail");
     let stderr_str = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr_str.contains("already running"), "got: {}", stderr_str);
+    assert!(
+        stderr_str.contains("already running"),
+        "got: {}",
+        stderr_str
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -379,7 +396,9 @@ fn control_socket_status() {
     let json: serde_json::Value = serde_json::from_str(resp.trim()).expect("status should be JSON");
 
     assert_eq!(json["project"], p.name);
-    let services = json["services"].as_array().expect("services should be array");
+    let services = json["services"]
+        .as_array()
+        .expect("services should be array");
     assert_eq!(services.len(), 1);
     assert_eq!(services[0]["name"], "sleeper");
 }
@@ -420,7 +439,10 @@ fn status_shows_services_while_running() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("SERVICE"), "should have table header");
     assert!(stdout.contains("base"), "should list 'base' service");
-    assert!(stdout.contains("dependent"), "should list 'dependent' service");
+    assert!(
+        stdout.contains("dependent"),
+        "should list 'dependent' service"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -452,7 +474,12 @@ fn logs_respects_line_count() {
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     let line_count = stdout.trim().lines().count();
-    assert!(line_count <= 2, "requested 2 lines but got {}: {}", line_count, stdout);
+    assert!(
+        line_count <= 2,
+        "requested 2 lines but got {}: {}",
+        line_count,
+        stdout
+    );
 }
 
 #[test]
@@ -584,11 +611,15 @@ watch = false
 fn down_when_not_running_fails() {
     let p = TestProject::new(&simple_toml(&unique_name("down-norun")));
     let out = p.devx().args(["down"]).output().unwrap();
-    assert!(!out.status.success(), "devx down should fail when not running");
+    assert!(
+        !out.status.success(),
+        "devx down should fail when not running"
+    );
     let stderr_str = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr_str.contains("no running devx instance") || stderr_str.contains("not found"),
-        "got: {}", stderr_str
+        "got: {}",
+        stderr_str
     );
 }
 

@@ -1,0 +1,623 @@
+#!/usr/bin/env bash
+# ale-react -- Threshold reactor for ALE Workflow
+#
+# Called by ale-emit after each event is recorded. Evaluates thresholds
+# against the event stream and dispatches actions with cooldown dedup.
+#
+# Usage:
+#   ale-react <event_type>
+#
+# Flow:
+#   1. Acquire mkdir-based lock (.ale/cache/.react.lock)
+#   2. Evaluate thresholds relevant to the trigger event type
+#   3. For exceeded thresholds: check cooldown — if expired, write action
+#   4. Invalidate relevant cache files
+#   5. Release lock
+#
+# Thresholds:
+#   - commits_without_pr:  >= N commits on branch without PR → review_checkpoint
+#   - branch_inactivity:   >= N min no commits → health_check
+#   - main_drift:          >= N commits behind merge base → rebase_reminder
+#   - pr_merge_velocity:   >= N merged/hour → integration_test
+#   - blocker_stale:       N min no progress after blocker → escalation
+#   - context_warning:     Watchdog hits critical → context_warning
+#
+# All operations are crash-safe: partial failure does not corrupt state.
+# Performance target: < 500ms (python3 calls for timestamp parsing add overhead).
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+find_ale_dir() {
+  local dir="$PWD"
+  while [ "$dir" != "/" ]; do
+    if [ -d "$dir/.ale" ]; then
+      echo "$dir/.ale"
+      return
+    fi
+    dir="$(dirname "$dir")"
+  done
+  local root
+  root=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+  echo "$root/.ale"
+}
+
+ALE_DIR="${ALE_DIR:-$(find_ale_dir)}"
+CACHE_DIR="$ALE_DIR/cache"
+EVENTS_DIR="$ALE_DIR/events"
+ACTIONS_DIR="$ALE_DIR/actions"
+ESCALATIONS_DIR="$HOME/.ale/escalations"
+
+mkdir -p "$CACHE_DIR" "$ACTIONS_DIR"
+
+# Event type that triggered this run
+TRIGGER="${1:-}"
+if [ -z "$TRIGGER" ]; then
+  exit 0
+fi
+
+NOW=$(date +%s)
+TODAY=$(date -u +%Y-%m-%d)
+
+# ---------------------------------------------------------------------------
+# Read threshold config from ale.config.yaml (fall back to defaults)
+# ---------------------------------------------------------------------------
+
+read_yaml_value() {
+  local key="$1"
+  local default="$2"
+  local config_file=""
+  local git_root
+  git_root=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
+
+  # Search order: project config > installed defaults > repo defaults
+  for f in "${git_root:+$git_root/.claude/ale.config.yaml}" "$HOME/.claude/ale/defaults.yaml" "${git_root:+$git_root/ale.defaults.yaml}"; do
+    [ -z "$f" ] && continue
+    if [ -f "$f" ]; then
+      config_file="$f"
+      break
+    fi
+  done
+
+  if [ -n "$config_file" ]; then
+    local val
+    val=$(grep -E "^\s*${key}:" "$config_file" 2>/dev/null | head -1 | sed 's/.*:\s*//' | sed 's/\s*#.*//' | tr -d ' "' || echo "")
+    if [ -n "$val" ] && [ "$val" != "~" ] && [ "$val" != "null" ]; then
+      echo "$val"
+      return
+    fi
+  fi
+
+  echo "$default"
+}
+
+# Threshold values (configurable)
+TH_COMMITS_WITHOUT_PR=$(read_yaml_value "commits_without_pr" "10")
+TH_COMMITS_WITHOUT_PR_COOLDOWN=$(read_yaml_value "commits_without_pr_cooldown" "3600")
+TH_BRANCH_INACTIVITY_MIN=$(read_yaml_value "branch_inactivity_minutes" "30")
+TH_BRANCH_INACTIVITY_COOLDOWN=$(read_yaml_value "branch_inactivity_cooldown" "1800")
+TH_MAIN_DRIFT=$(read_yaml_value "main_drift_commits" "5")
+TH_MAIN_DRIFT_COOLDOWN=$(read_yaml_value "main_drift_cooldown" "1800")
+TH_PR_MERGE_VELOCITY=$(read_yaml_value "pr_merge_velocity" "3")
+TH_PR_MERGE_VELOCITY_COOLDOWN=$(read_yaml_value "pr_merge_velocity_cooldown" "3600")
+TH_BLOCKER_STALE_MIN=$(read_yaml_value "blocker_stale_minutes" "15")
+TH_BLOCKER_STALE_COOLDOWN=$(read_yaml_value "blocker_stale_cooldown" "3600")
+
+# ---------------------------------------------------------------------------
+# Lock management (mkdir-based, atomic, POSIX-safe)
+# ---------------------------------------------------------------------------
+
+LOCK_DIR="$CACHE_DIR/.react.lock"
+LOCK_STALE_SECONDS=30
+
+acquire_lock() {
+  if mkdir "$LOCK_DIR" 2>/dev/null; then
+    echo $$ > "$LOCK_DIR/pid.tmp" && mv "$LOCK_DIR/pid.tmp" "$LOCK_DIR/pid"
+    return 0
+  fi
+
+  # Check for stale lock
+  if [ -d "$LOCK_DIR" ]; then
+    # Missing pid file means the locker was killed between mkdir and pid write — treat as stale
+    if [ ! -f "$LOCK_DIR/pid" ]; then
+      rm -rf "$LOCK_DIR"
+      if mkdir "$LOCK_DIR" 2>/dev/null; then
+        echo $$ > "$LOCK_DIR/pid.tmp" && mv "$LOCK_DIR/pid.tmp" "$LOCK_DIR/pid"
+        return 0
+      fi
+    else
+      local lock_pid
+      lock_pid=$(cat "$LOCK_DIR/pid" 2>/dev/null || echo "")
+
+      # Check if PID is still alive
+      if [ -n "$lock_pid" ] && ! kill -0 "$lock_pid" 2>/dev/null; then
+        # Process is dead — break stale lock
+        rm -rf "$LOCK_DIR"
+        if mkdir "$LOCK_DIR" 2>/dev/null; then
+          echo $$ > "$LOCK_DIR/pid.tmp" && mv "$LOCK_DIR/pid.tmp" "$LOCK_DIR/pid"
+          return 0
+        fi
+      fi
+
+      # Check age-based staleness
+      local lock_age=0
+      local lock_mtime
+      # stat -f %m on macOS, stat -c %Y on Linux
+      lock_mtime=$(stat -f %m "$LOCK_DIR/pid" 2>/dev/null || stat -c %Y "$LOCK_DIR/pid" 2>/dev/null || echo "$NOW")
+      lock_age=$((NOW - lock_mtime))
+
+      if [ "$lock_age" -gt "$LOCK_STALE_SECONDS" ]; then
+        rm -rf "$LOCK_DIR"
+        if mkdir "$LOCK_DIR" 2>/dev/null; then
+          echo $$ > "$LOCK_DIR/pid.tmp" && mv "$LOCK_DIR/pid.tmp" "$LOCK_DIR/pid"
+          return 0
+        fi
+      fi
+    fi
+  fi
+
+  # Could not acquire — another reactor is running (skip, idempotent)
+  return 1
+}
+
+release_lock() {
+  # Only release if we own the lock
+  if [ -f "$LOCK_DIR/pid" ]; then
+    local lock_pid
+    lock_pid=$(cat "$LOCK_DIR/pid" 2>/dev/null || echo "")
+    if [ "$lock_pid" = "$$" ]; then
+      rm -rf "$LOCK_DIR"
+    fi
+  fi
+}
+
+if ! acquire_lock; then
+  exit 0
+fi
+
+# Register trap AFTER successful acquire — avoids deleting another process's lock
+trap release_lock EXIT
+
+# ---------------------------------------------------------------------------
+# Cooldown checking
+# ---------------------------------------------------------------------------
+
+# Check if an action is still in cooldown.
+# Returns 0 (true) if cooled down (can fire), 1 if still in cooldown.
+check_cooldown() {
+  local action="$1"
+  local key="$2"
+  local cooldown_seconds="$3"
+
+  local cooldown_file="$ACTIONS_DIR/${action}--${key}.epoch"
+
+  if [ ! -f "$cooldown_file" ]; then
+    return 0  # No previous fire — can fire
+  fi
+
+  local last_fire
+  last_fire=$(cat "$cooldown_file" 2>/dev/null || echo "0")
+
+  # Validate it's a number
+  if ! echo "$last_fire" | grep -qE '^[0-9]+$'; then
+    return 0  # Corrupt file — allow fire
+  fi
+
+  local elapsed=$((NOW - last_fire))
+  if [ "$elapsed" -ge "$cooldown_seconds" ]; then
+    return 0  # Cooldown expired — can fire
+  fi
+
+  return 1  # Still in cooldown
+}
+
+update_cooldown() {
+  local action="$1"
+  local key="$2"
+
+  local cooldown_file="$ACTIONS_DIR/${action}--${key}.epoch"
+  echo "$NOW" > "$cooldown_file"
+}
+
+# ---------------------------------------------------------------------------
+# Write pending action (atomic append)
+# ---------------------------------------------------------------------------
+
+write_action() {
+  local action="$1"
+  shift
+  # Remaining args are key=value pairs for the JSON payload
+
+  local actions_file="$CACHE_DIR/pending-actions.jsonl"
+  python3 -c "
+import json, sys
+obj = {'action': sys.argv[1], 'ts': int(sys.argv[2])}
+for pair in sys.argv[3:]:
+    k, _, v = pair.partition('=')
+    obj[k] = v
+print(json.dumps(obj, separators=(',', ':')))
+" "$action" "$NOW" "$@" >> "$actions_file"
+}
+
+# ---------------------------------------------------------------------------
+# Threshold evaluation helpers
+# ---------------------------------------------------------------------------
+
+# Count events of a given type on a branch from today's event file
+count_events_today() {
+  local event_type="$1"
+  local branch="${2:-}"
+  local file="$EVENTS_DIR/$TODAY.jsonl"
+
+  if [ ! -f "$file" ]; then
+    echo "0"
+    return 0
+  fi
+
+  if [ -n "$branch" ]; then
+    # Use grep -F for fixed-string matching — branch names may contain regex metacharacters
+    grep -F "\"type\":\"$event_type\"" "$file" 2>/dev/null | grep -cF "\"branch\":\"$branch\"" 2>/dev/null || echo "0"
+  else
+    grep -cF "\"type\":\"$event_type\"" "$file" 2>/dev/null || echo "0"
+  fi
+}
+
+# Get last event timestamp of a type on a branch
+last_event_ts() {
+  local event_type="$1"
+  local branch="${2:-}"
+  local file="$EVENTS_DIR/$TODAY.jsonl"
+
+  if [ ! -f "$file" ]; then
+    echo "0"
+    return 0
+  fi
+
+  local line=""
+  if [ -n "$branch" ]; then
+    line=$(grep -F "\"type\":\"$event_type\"" "$file" 2>/dev/null | grep -F "\"branch\":\"$branch\"" 2>/dev/null | tail -1)
+  else
+    line=$(grep -F "\"type\":\"$event_type\"" "$file" 2>/dev/null | tail -1)
+  fi
+
+  if [ -z "$line" ]; then
+    echo "0"
+    return 0
+  fi
+
+  # Extract timestamp and convert to epoch
+  local ts_str
+  ts_str=$(echo "$line" | sed -n 's/.*"ts":"\([^"]*\)".*/\1/p')
+  if [ -n "$ts_str" ]; then
+    # Convert ISO 8601 to epoch (macOS and Linux compatible)
+    python3 -c "
+import sys
+from datetime import datetime
+try:
+    dt = datetime.strptime(sys.argv[1], '%Y-%m-%dT%H:%M:%SZ')
+    print(int(dt.timestamp()))
+except:
+    print(0)
+" "$ts_str" 2>/dev/null || echo "0"
+  else
+    echo "0"
+  fi
+}
+
+get_current_branch() {
+  git symbolic-ref --short HEAD 2>/dev/null || echo ""
+}
+
+# ---------------------------------------------------------------------------
+# Threshold 1: Commits without PR (trigger: commit)
+# ---------------------------------------------------------------------------
+
+check_commits_without_pr() {
+  local branch
+  branch=$(get_current_branch)
+  [ -z "$branch" ] && return 0
+  [ "$branch" = "main" ] && return 0
+  [ "$branch" = "master" ] && return 0
+
+  local commit_count
+  commit_count=$(count_events_today "commit" "$branch")
+
+  if [ "$commit_count" -ge "$TH_COMMITS_WITHOUT_PR" ]; then
+    # Check if there's already a PR for this branch (best-effort)
+    local has_pr=false
+    if command -v gh >/dev/null 2>&1; then
+      local pr_count
+      pr_count=$(gh pr list --head "$branch" --state open --json number 2>/dev/null | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
+      [ "$pr_count" -gt 0 ] && has_pr=true
+    fi
+
+    if [ "$has_pr" = false ]; then
+      local safe_branch="${branch//\//_}"
+      if check_cooldown "review_checkpoint" "$safe_branch" "$TH_COMMITS_WITHOUT_PR_COOLDOWN"; then
+        write_action "review_checkpoint" "branch=$branch" "commits=$commit_count"
+        update_cooldown "review_checkpoint" "$safe_branch"
+      fi
+    fi
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Threshold 2: Branch inactivity (trigger: any — checked on every event)
+# ---------------------------------------------------------------------------
+
+check_branch_inactivity() {
+  local branch
+  branch=$(get_current_branch)
+  [ -z "$branch" ] && return 0
+  [ "$branch" = "main" ] && return 0
+  [ "$branch" = "master" ] && return 0
+
+  local last_commit_ts
+  last_commit_ts=$(last_event_ts "commit" "$branch")
+
+  # If no commits today, check git log for last commit time
+  if [ "$last_commit_ts" = "0" ]; then
+    last_commit_ts=$(git log -1 --format='%ct' 2>/dev/null || echo "0")
+  fi
+
+  [ "$last_commit_ts" = "0" ] && return 0
+
+  local idle_seconds=$((NOW - last_commit_ts))
+  local idle_threshold=$((TH_BRANCH_INACTIVITY_MIN * 60))
+
+  if [ "$idle_seconds" -ge "$idle_threshold" ]; then
+    local safe_branch="${branch//\//_}"
+    if check_cooldown "health_check" "$safe_branch" "$TH_BRANCH_INACTIVITY_COOLDOWN"; then
+      write_action "health_check" "branch=$branch" "idle_minutes=$((idle_seconds / 60))"
+      update_cooldown "health_check" "$safe_branch"
+    fi
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Threshold 3: Main drift (trigger: commit, push)
+# ---------------------------------------------------------------------------
+
+check_main_drift() {
+  local branch
+  branch=$(get_current_branch)
+  [ -z "$branch" ] && return 0
+  [ "$branch" = "main" ] && return 0
+  [ "$branch" = "master" ] && return 0
+
+  # Count commits on main that are not in our branch
+  local drift=0
+  drift=$(git rev-list --count HEAD..origin/main 2>/dev/null || echo "0")
+
+  if [ "$drift" -ge "$TH_MAIN_DRIFT" ]; then
+    local safe_branch="${branch//\//_}"
+    if check_cooldown "rebase_reminder" "$safe_branch" "$TH_MAIN_DRIFT_COOLDOWN"; then
+      write_action "rebase_reminder" "branch=$branch" "drift=$drift"
+      update_cooldown "rebase_reminder" "$safe_branch"
+    fi
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Threshold 4: PR merge velocity (trigger: pr_merged)
+# ---------------------------------------------------------------------------
+
+check_pr_merge_velocity() {
+  local file="$EVENTS_DIR/$TODAY.jsonl"
+  [ -f "$file" ] || return 0
+
+  # Count pr_merged events in last hour
+  local one_hour_ago=$((NOW - 3600))
+  local merge_count=0
+
+  while IFS= read -r line; do
+    local ts_str
+    ts_str=$(echo "$line" | sed -n 's/.*"ts":"\([^"]*\)".*/\1/p')
+    [ -z "$ts_str" ] && continue
+    local ts_epoch
+    ts_epoch=$(python3 -c "
+import sys
+from datetime import datetime
+try:
+    dt = datetime.strptime(sys.argv[1], '%Y-%m-%dT%H:%M:%SZ')
+    print(int(dt.timestamp()))
+except:
+    print(0)
+" "$ts_str" 2>/dev/null || echo "0")
+    if [ "$ts_epoch" -ge "$one_hour_ago" ]; then
+      merge_count=$((merge_count + 1))
+    fi
+  done < <(grep '"type":"pr_merged"' "$file" 2>/dev/null || true)
+
+  if [ "$merge_count" -ge "$TH_PR_MERGE_VELOCITY" ]; then
+    if check_cooldown "integration_test" "global" "$TH_PR_MERGE_VELOCITY_COOLDOWN"; then
+      write_action "integration_test" "merged_count=$merge_count" "window=1h"
+      update_cooldown "integration_test" "global"
+    fi
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Threshold 5: Blocker stale (trigger: any tool use — checked via blocker file)
+# ---------------------------------------------------------------------------
+
+check_blocker_stale() {
+  # Look for blocker state files written by PostToolUse hooks
+  local session_key="${ALE_SESSION_ID:-$PPID}"
+
+  # Check multiple possible blocker locations
+  local blocker_file=""
+  for f in "/tmp/ale-blocker-${session_key}.json" "/tmp/ale-blocker-$PPID.json"; do
+    if [ -f "$f" ]; then
+      blocker_file="$f"
+      break
+    fi
+  done
+
+  [ -z "$blocker_file" ] && return 0
+
+  local blocker_ts
+  blocker_ts=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print(d.get('timestamp', 0))
+except:
+    print(0)
+" "$blocker_file" 2>/dev/null || echo "0")
+
+  [ "$blocker_ts" = "0" ] && return 0
+
+  local stale_seconds=$((NOW - blocker_ts))
+  local stale_threshold=$((TH_BLOCKER_STALE_MIN * 60))
+
+  if [ "$stale_seconds" -ge "$stale_threshold" ]; then
+    # Check for any commits since the blocker
+    local branch
+    branch=$(get_current_branch)
+    local last_commit_ts
+    last_commit_ts=$(git log -1 --format='%ct' 2>/dev/null || echo "0")
+
+    # If no commits after blocker, escalate
+    if [ "$last_commit_ts" -le "$blocker_ts" ]; then
+      local safe_key="session_${session_key}"
+      if check_cooldown "blocker_escalation" "$safe_key" "$TH_BLOCKER_STALE_COOLDOWN"; then
+        # Write escalation file for human review
+        mkdir -p "$ESCALATIONS_DIR"
+        local esc_file="$ESCALATIONS_DIR/esc-${NOW}.json"
+
+        local blocker_desc
+        blocker_desc=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print(d.get('description', 'Unknown blocker'))
+except:
+    print('Unknown blocker')
+" "$blocker_file" 2>/dev/null || echo "Unknown blocker")
+
+        python3 -c "
+import json, sys
+obj = {
+    'type': 'blocker_escalation',
+    'ts': int(sys.argv[1]),
+    'session': sys.argv[2],
+    'branch': sys.argv[3],
+    'blocker': sys.argv[4],
+    'stale_minutes': int(sys.argv[5])
+}
+with open(sys.argv[6], 'w') as f:
+    json.dump(obj, f, separators=(',', ':'))
+    f.write('\n')
+" "$NOW" "$session_key" "${branch:-unknown}" "$blocker_desc" "$((stale_seconds / 60))" "$esc_file"
+
+        write_action "blocker_escalation" "branch=${branch:-unknown}" "stale_minutes=$((stale_seconds / 60))"
+        update_cooldown "blocker_escalation" "$safe_key"
+      fi
+    fi
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Threshold 6: Context warning (trigger: context_warning)
+# ---------------------------------------------------------------------------
+
+check_context_warning() {
+  # The context_warning event is emitted by the watchdog hook.
+  # When we receive it at critical level, write a pending action.
+  local file="$EVENTS_DIR/$TODAY.jsonl"
+  [ -f "$file" ] || return 0
+
+  # Get the most recent context_warning event
+  local last_warning
+  last_warning=$(grep '"type":"context_warning"' "$file" 2>/dev/null | tail -1 || echo "")
+  [ -z "$last_warning" ] && return 0
+
+  # Check if it's critical
+  if echo "$last_warning" | grep -q '"level":"critical"'; then
+    local session_key="${ALE_SESSION_ID:-$PPID}"
+    # Per-session cooldown: only fire once per session
+    if check_cooldown "context_warning" "session_${session_key}" "86400"; then
+      local tool_calls
+      tool_calls=$(echo "$last_warning" | sed -n 's/.*"tool_calls":"\([^"]*\)".*/\1/p')
+      write_action "context_warning" "session=$session_key" "tool_calls=${tool_calls:-unknown}"
+      update_cooldown "context_warning" "session_${session_key}"
+    fi
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Cache invalidation
+# ---------------------------------------------------------------------------
+
+invalidate_cache() {
+  local trigger="$1"
+
+  case "$trigger" in
+    commit)
+      rm -f "$CACHE_DIR/state-snapshot.json"
+      ;;
+    push)
+      rm -f "$CACHE_DIR/state-snapshot.json"
+      rm -f "$CACHE_DIR/branches.json"
+      rm -f "$CACHE_DIR/conflicts.json"
+      ;;
+    pr_merged)
+      # Invalidate everything on merge
+      rm -f "$CACHE_DIR/state-snapshot.json"
+      rm -f "$CACHE_DIR/branches.json"
+      rm -f "$CACHE_DIR/conflicts.json"
+      rm -f "$CACHE_DIR/prs.json"
+      ;;
+    context_warning)
+      rm -f "$CACHE_DIR/state-snapshot.json"
+      ;;
+    *)
+      # Other events: just invalidate the main snapshot
+      rm -f "$CACHE_DIR/state-snapshot.json"
+      ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# Main: evaluate thresholds based on trigger type
+# ---------------------------------------------------------------------------
+
+case "$TRIGGER" in
+  commit)
+    check_commits_without_pr
+    check_main_drift
+    check_branch_inactivity
+    check_blocker_stale
+    ;;
+  push)
+    check_main_drift
+    check_branch_inactivity
+    ;;
+  pr_merged)
+    check_pr_merge_velocity
+    ;;
+  context_warning)
+    check_context_warning
+    ;;
+  session_start)
+    check_branch_inactivity
+    check_main_drift
+    ;;
+  blocker)
+    check_blocker_stale
+    ;;
+  *)
+    # Any other event: run inactivity and blocker checks
+    check_branch_inactivity
+    check_blocker_stale
+    ;;
+esac
+
+# Invalidate relevant caches
+invalidate_cache "$TRIGGER"
+
+exit 0

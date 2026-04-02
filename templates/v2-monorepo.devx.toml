@@ -1,5 +1,4 @@
-# devx.toml — Sharpi v2-monorepo
-# Replaces: make dev (infra + backend + frontend)
+# devx.toml — Sharpi v2-monorepo (full local, no Docker)
 #
 # Usage:
 #   devx up              — start everything
@@ -9,27 +8,34 @@
 [project]
 name = "sharpi-v2"
 
-[infra]
-compose = "docker-compose.dev.yml"
+# ── Temporal (local dev server) ──────────────────────────────
+# Replaces docker compose — runs Temporal + UI in a single process.
+# Data persisted to .temporal.db (survives restarts).
+# gRPC at :7233 (backend connects here), UI at :8233 (browser).
+[services.temporal]
+cmd = "temporal server start-dev --db-filename=.temporal.db"
+port = 8233
+managed = false
+domain = "temporal.localhost"
+health = "http://localhost:8233"
+watch = false
 
 # ── Backend (Encore) ─────────────────────────────────────────
-# [infra] compose is started automatically before any services
+# Encore auto-detected — devx injects --port. Encore manages its own Postgres.
 [services.backend]
 cmd = "encore run"
 dir = "backend"
 port = 4000
 domain = "api.localhost"
-health = "http://localhost:${port}/healthz"
+health = "http://localhost:9400/healthz"
+depends_on = ["temporal"]
 env = { TEMPORAL_ADDR = "localhost:7233" }
 
 # ── Frontend (Next.js) ───────────────────────────────────────
+# Next.js auto-detected — devx injects PORT env var.
 [services.frontend]
 cmd = "pnpm dev"
 dir = "frontend"
 port = 3000
 domain = "web.localhost"
 depends_on = ["backend"]
-
-# ── Temporal UI (exposed from Docker) ────────────────────────
-# Not a managed service — exposed by docker compose at :8233
-# Access via: http://localhost:8233
