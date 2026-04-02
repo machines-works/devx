@@ -25,6 +25,9 @@ pub enum OrchestratorCommand {
     Restart { service: String },
     ReloadConfig,
     Shutdown,
+    Status {
+        reply: tokio::sync::oneshot::Sender<String>,
+    },
 }
 
 pub struct Orchestrator {
@@ -360,6 +363,27 @@ impl Orchestrator {
                             });
                         }
                     }
+                }
+                OrchestratorCommand::Status { reply } => {
+                    let statuses: Vec<serde_json::Value> = self
+                        .processes
+                        .iter()
+                        .map(|(name, proc)| {
+                            let uptime = proc.started_at.map(|t| t.elapsed().as_secs());
+                            serde_json::json!({
+                                "name": name,
+                                "state": proc.state.label(),
+                                "port": self.actual_ports.get(name),
+                                "proxy_port": self.proxy_ports.get(name),
+                                "uptime_secs": uptime,
+                            })
+                        })
+                        .collect();
+                    let response = serde_json::json!({
+                        "services": statuses,
+                        "project": self.config.project.name,
+                    });
+                    let _ = reply.send(response.to_string());
                 }
                 OrchestratorCommand::Shutdown => {
                     let _ = self.shutdown().await;
