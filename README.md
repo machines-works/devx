@@ -13,10 +13,21 @@ devx reads a `devx.toml` from your project root, auto-discovers free ports, runs
 - **Dependency ordering** — services start in the right order
 - **Health checks** — polls health endpoints, shows readiness in real-time
 
-## Quick Start
+## Install
+
+```bash
+curl -fsSL https://devx.machines.works/install.sh | sh
+```
+
+Or build from source:
 
 ```bash
 cargo install --path .
+```
+
+Then run in any project with a `devx.toml`:
+
+```bash
 devx up
 ```
 
@@ -69,9 +80,28 @@ VITE_API_URL = "http://localhost:${proxy:api}"
 - Rust 1.85+ (edition 2024)
 - Docker (for infra pre-flight checks)
 
+## Deploy
+
+The landing page at [devx.machines.works](https://devx.machines.works) is a static site in `site/`. Deploy manually:
+
+```bash
+vercel deploy --prod site/
+```
+
+## Release
+
+Tag a version to trigger the release workflow:
+
+```bash
+git tag v0.0.2-alpha
+git push origin v0.0.2-alpha
+```
+
+Builds binaries for darwin-arm64, linux-x86_64, and linux-arm64.
+
 ## Status
 
-Early development. Built by [Machines Works](https://machines.works).
+Alpha. Built by [Machines Works](https://machines.works).
 
 ## License
 
