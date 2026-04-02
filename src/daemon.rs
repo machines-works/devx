@@ -69,15 +69,11 @@ pub fn daemonize(project_name: &str) -> Result<()> {
         std::process::exit(0);
     }
 
-    // Child process continues below
-
-    // Create a new session so the child is detached from the terminal
-    // SAFETY: setsid() is async-signal-safe and standard for daemonization.
+    // SAFETY: setsid() detaches from the controlling terminal
     if unsafe { libc::setsid() } == -1 {
         bail!("setsid() failed: {}", std::io::Error::last_os_error());
     }
 
-    // Redirect stdout and stderr to the log file
     let log_file = fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -85,14 +81,12 @@ pub fn daemonize(project_name: &str) -> Result<()> {
 
     let log_fd = std::os::unix::io::AsRawFd::as_raw_fd(&log_file);
 
-    // SAFETY: dup2 is standard POSIX. Redirecting stdout (fd 1) and stderr
-    // (fd 2) to our log file so all output goes there.
+    // SAFETY: dup2 redirects stdout/stderr to our log file
     unsafe {
         libc::dup2(log_fd, libc::STDOUT_FILENO);
         libc::dup2(log_fd, libc::STDERR_FILENO);
     }
 
-    // Write PID file
     let child_pid = std::process::id();
     let mut f = fs::File::create(&pid_file)?;
     writeln!(f, "{}", child_pid)?;

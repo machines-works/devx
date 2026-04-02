@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::io::{BufRead, Seek, Write};
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -92,21 +93,25 @@ fn find_project_root() -> Result<PathBuf> {
     }
 }
 
-fn cmd_up(daemon_mode: bool, services: Vec<String>) -> Result<()> {
+fn load_project_config() -> Result<(PathBuf, DevxConfig)> {
     let project_root = find_project_root()?;
     let config = DevxConfig::load(&project_root.join("devx.toml"))?;
+    Ok((project_root, config))
+}
 
-    let project_name = config.project.name.clone();
+fn service_filter(services: Vec<String>) -> Option<Vec<String>> {
+    if services.is_empty() { None } else { Some(services) }
+}
 
-    // Check if already running
-    if daemon::is_running(&project_name) {
-        if let Some(pid) = daemon::read_pid(&project_name) {
-            bail!(
-                "devx is already running for '{}' (pid {}). Use 'devx down' first.",
-                project_name,
-                pid
-            );
-        }
+fn cmd_up(daemon_mode: bool, services: Vec<String>) -> Result<()> {
+    let (project_root, config) = load_project_config()?;
+    let project_name = &config.project.name;
+
+    if daemon::is_running(project_name) {
+        bail!(
+            "devx is already running for '{}'. Use 'devx down' first.",
+            project_name
+        );
     }
 
     if daemon_mode {
@@ -124,11 +129,7 @@ fn cmd_up_tui(config: DevxConfig, project_root: PathBuf, services: Vec<String>) 
     let mut orchestrator = Orchestrator::new(config, project_root.clone(), event_tx);
     let service_names = orchestrator.service_names();
 
-    let filter: Option<Vec<String>> = if services.is_empty() {
-        None
-    } else {
-        Some(services)
-    };
+    let filter = service_filter(services);
 
     let runtime = tokio::runtime::Runtime::new()?;
 
@@ -166,27 +167,18 @@ fn cmd_up_tui(config: DevxConfig, project_root: PathBuf, services: Vec<String>) 
 fn cmd_up_daemon(config: DevxConfig, project_root: PathBuf, services: Vec<String>) -> Result<()> {
     let project_name = config.project.name.clone();
 
-    // Daemonize: parent prints PID and exits, child continues
+    // Parent prints PID and exits; child continues past this point
     daemon::daemonize(&project_name)?;
-
-    // --- Child process continues here ---
 
     let log_file_path = daemon::log_path(&project_name);
     let project_name_cleanup = project_name.clone();
 
     let (event_tx, mut event_rx) = mpsc::channel(8192);
-
     let mut orchestrator = Orchestrator::new(config, project_root.clone(), event_tx);
-
-    let filter: Option<Vec<String>> = if services.is_empty() {
-        None
-    } else {
-        Some(services)
-    };
+    let filter = service_filter(services);
 
     let runtime = tokio::runtime::Runtime::new()?;
 
-    // Spawn orchestrator start + command loop
     let filter_clone = filter.clone();
     runtime.spawn(async move {
         let filter_ref = filter_clone.as_deref();
@@ -197,9 +189,7 @@ fn cmd_up_daemon(config: DevxConfig, project_root: PathBuf, services: Vec<String
         orchestrator.run_loop().await;
     });
 
-    // Run the daemon event drain loop
     runtime.block_on(async {
-        // Open log file for writing events
         let mut log_file = match std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -212,12 +202,10 @@ fn cmd_up_daemon(config: DevxConfig, project_root: PathBuf, services: Vec<String
             }
         };
 
-        // Write startup marker
         let ts = daemon::format_timestamp(SystemTime::now());
         let _ = writeln!(log_file, "[{}] [devx] daemon started (pid {})", ts, std::process::id());
         let _ = log_file.flush();
 
-        // Set up SIGTERM handler for graceful shutdown
         let mut sigterm = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
             Ok(s) => s,
             Err(e) => {
@@ -234,7 +222,6 @@ fn cmd_up_daemon(config: DevxConfig, project_root: PathBuf, services: Vec<String
                     match event {
                         Some(evt) => {
                             write_event_to_log(&mut log_file, &evt);
-                            // If the TUI would have quit on this event, we should too
                             if matches!(evt, DevxEvent::ControlShutdown) {
                                 let ts = daemon::format_timestamp(SystemTime::now());
                                 let _ = writeln!(log_file, "[{}] [devx] received shutdown command", ts);
@@ -242,10 +229,7 @@ fn cmd_up_daemon(config: DevxConfig, project_root: PathBuf, services: Vec<String
                                 break;
                             }
                         }
-                        None => {
-                            // Channel closed — orchestrator gone
-                            break;
-                        }
+                        None => break,
                     }
                 }
                 _ = sigterm.recv() => {
@@ -262,105 +246,63 @@ fn cmd_up_daemon(config: DevxConfig, project_root: PathBuf, services: Vec<String
         let _ = log_file.flush();
     });
 
-    // Clean up
     control::cleanup(&project_name_cleanup);
     daemon::cleanup_pid(&project_name_cleanup);
-
-    // Shutdown runtime
     runtime.shutdown_timeout(std::time::Duration::from_secs(2));
 
     Ok(())
 }
 
-/// Write a DevxEvent to the log file in a grep-friendly format.
 fn write_event_to_log(log_file: &mut std::fs::File, event: &DevxEvent) {
+    // Skip events that produce no output
+    if matches!(event, DevxEvent::Tick | DevxEvent::ControlShutdown) {
+        return;
+    }
+
     let ts = daemon::format_timestamp(SystemTime::now());
     match event {
-        DevxEvent::LogLine {
-            service,
-            line,
-            is_stderr,
-        } => {
+        DevxEvent::LogLine { service, line, is_stderr } => {
             if *is_stderr {
                 let _ = writeln!(log_file, "[{}] [{}] [stderr] {}", ts, service, line);
             } else {
                 let _ = writeln!(log_file, "[{}] [{}] {}", ts, service, line);
             }
         }
-        DevxEvent::StateChange {
-            service,
-            state,
-            ..
-        } => {
+        DevxEvent::StateChange { service, state, .. } => {
             let _ = writeln!(log_file, "[{}] [{}] state: {}", ts, service, state.label());
         }
-        DevxEvent::ProxyBound {
-            service,
-            proxy_port,
-            target_port,
-        } => {
-            let _ = writeln!(
-                log_file,
-                "[{}] [{}] proxy :{} -> :{}",
-                ts, service, proxy_port, target_port
-            );
+        DevxEvent::ProxyBound { service, proxy_port, target_port } => {
+            let _ = writeln!(log_file, "[{}] [{}] proxy :{} -> :{}", ts, service, proxy_port, target_port);
         }
-        DevxEvent::VhostBound {
-            port,
-            domains,
-            tls,
-        } => {
+        DevxEvent::VhostBound { port, domains, tls } => {
             let domain_list: Vec<&str> = domains.iter().map(|(d, _)| d.as_str()).collect();
             let proto = if *tls { "https" } else { "http" };
-            let _ = writeln!(
-                log_file,
-                "[{}] [devx] vhost {} :{} domains: {}",
-                ts,
-                proto,
-                port,
-                domain_list.join(", ")
-            );
+            let _ = writeln!(log_file, "[{}] [devx] vhost {} :{} domains: {}", ts, proto, port, domain_list.join(", "));
         }
         DevxEvent::FileChanged { service } => {
             let _ = writeln!(log_file, "[{}] [{}] file changed, restarting", ts, service);
         }
         DevxEvent::ConfigReloaded { diff } => {
             let mut parts = Vec::new();
-            for name in &diff.added {
-                parts.push(format!("added {}", name));
-            }
-            for name in &diff.removed {
-                parts.push(format!("removed {}", name));
-            }
-            for name in &diff.changed {
-                parts.push(format!("changed {}", name));
-            }
-            let summary = if parts.is_empty() {
-                "no changes".to_string()
-            } else {
-                parts.join(", ")
-            };
+            for name in &diff.added { parts.push(format!("added {}", name)); }
+            for name in &diff.removed { parts.push(format!("removed {}", name)); }
+            for name in &diff.changed { parts.push(format!("changed {}", name)); }
+            let summary = if parts.is_empty() { "no changes".to_string() } else { parts.join(", ") };
             let _ = writeln!(log_file, "[{}] [devx] config reloaded: {}", ts, summary);
         }
         DevxEvent::AllStarted => {
             let _ = writeln!(log_file, "[{}] [devx] all services started", ts);
         }
-        DevxEvent::ControlShutdown => {
-            // Handled in the main loop
-        }
         DevxEvent::ControlRestart { service } => {
             let _ = writeln!(log_file, "[{}] [devx] control: restart {}", ts, service);
         }
-        DevxEvent::Tick => {
-            // Ignored — no-op for daemon
-        }
+        DevxEvent::Tick | DevxEvent::ControlShutdown => unreachable!(),
     }
     let _ = log_file.flush();
 }
 
 fn cmd_down() -> Result<()> {
-    let project_root = find_project_root()?;
-    let config = DevxConfig::load(&project_root.join("devx.toml"))?;
+    let (_project_root, config) = load_project_config()?;
     let project_name = config.project.name;
 
     let rt = tokio::runtime::Runtime::new()?;
@@ -388,8 +330,7 @@ fn cmd_down() -> Result<()> {
 }
 
 fn cmd_restart(service: String) -> Result<()> {
-    let project_root = find_project_root()?;
-    let config = DevxConfig::load(&project_root.join("devx.toml"))?;
+    let (_project_root, config) = load_project_config()?;
     let project_name = config.project.name;
 
     let cmd = serde_json::json!({"cmd": "restart", "service": service}).to_string();
@@ -407,8 +348,7 @@ fn cmd_restart(service: String) -> Result<()> {
 }
 
 fn cmd_status() -> Result<()> {
-    let project_root = find_project_root()?;
-    let config = DevxConfig::load(&project_root.join("devx.toml"))?;
+    let (_project_root, config) = load_project_config()?;
     let project_name = config.project.name;
 
     let socket = control::socket_path(&project_name);
@@ -482,8 +422,7 @@ fn format_uptime(secs: u64) -> String {
 }
 
 fn cmd_logs(follow: bool, service_filter: Option<String>, lines: usize) -> Result<()> {
-    let project_root = find_project_root()?;
-    let config = DevxConfig::load(&project_root.join("devx.toml"))?;
+    let (_project_root, config) = load_project_config()?;
     let project_name = config.project.name;
 
     let log_file_path = daemon::log_path(&project_name);
@@ -495,22 +434,26 @@ fn cmd_logs(follow: bool, service_filter: Option<String>, lines: usize) -> Resul
         );
     }
 
-    // Read last N lines (tail behavior)
-    let file = std::fs::File::open(&log_file_path)?;
-    let reader = std::io::BufReader::new(file);
-    let all_lines: Vec<String> = reader.lines().collect::<std::io::Result<Vec<_>>>()?;
-
-    // Filter by service if requested
-    let filtered: Vec<&String> = if let Some(ref svc) = service_filter {
-        let pattern = format!("[{}]", svc);
-        all_lines.iter().filter(|l| l.contains(&pattern)).collect()
-    } else {
-        all_lines.iter().collect()
+    let filter_pattern = service_filter.as_ref().map(|svc| format!("[{}]", svc));
+    let matches_filter = |line: &str| -> bool {
+        filter_pattern.as_ref().map_or(true, |p| line.contains(p))
     };
 
-    // Show last N lines
-    let start = filtered.len().saturating_sub(lines);
-    for line in &filtered[start..] {
+    // Stream through file keeping only the last N matching lines (avoids loading entire file)
+    let file = std::fs::File::open(&log_file_path)?;
+    let reader = std::io::BufReader::new(file);
+    let mut tail: VecDeque<String> = VecDeque::with_capacity(lines);
+    for line in reader.lines() {
+        let line = line?;
+        if matches_filter(&line) {
+            if tail.len() >= lines {
+                tail.pop_front();
+            }
+            tail.push_back(line);
+        }
+    }
+
+    for line in &tail {
         println!("{}", line);
     }
 
@@ -518,7 +461,6 @@ fn cmd_logs(follow: bool, service_filter: Option<String>, lines: usize) -> Resul
         return Ok(());
     }
 
-    // Follow mode: seek to end and poll for new data
     if !daemon::is_running(&project_name) {
         println!("(daemon is not running, cannot follow)");
         return Ok(());
@@ -526,16 +468,13 @@ fn cmd_logs(follow: bool, service_filter: Option<String>, lines: usize) -> Resul
 
     let mut file = std::fs::File::open(&log_file_path)?;
     file.seek(std::io::SeekFrom::End(0))?;
-
     let mut reader = std::io::BufReader::new(file);
+
     loop {
         let mut line = String::new();
         match reader.read_line(&mut line) {
             Ok(0) => {
-                // No new data — sleep and retry
                 std::thread::sleep(std::time::Duration::from_millis(200));
-
-                // Check if daemon is still running
                 if !daemon::is_running(&project_name) {
                     println!("(daemon stopped)");
                     break;
@@ -543,12 +482,7 @@ fn cmd_logs(follow: bool, service_filter: Option<String>, lines: usize) -> Resul
             }
             Ok(_) => {
                 let line = line.trim_end();
-                if let Some(ref svc) = service_filter {
-                    let pattern = format!("[{}]", svc);
-                    if line.contains(&pattern) {
-                        println!("{}", line);
-                    }
-                } else {
+                if matches_filter(line) {
                     println!("{}", line);
                 }
             }
@@ -562,8 +496,7 @@ fn cmd_logs(follow: bool, service_filter: Option<String>, lines: usize) -> Resul
 }
 
 fn cmd_check() -> Result<()> {
-    let project_root = find_project_root()?;
-    let config = DevxConfig::load(&project_root.join("devx.toml"))?;
+    let (project_root, config) = load_project_config()?;
 
     let service_count = config.services.len();
     println!("devx.toml: valid ({} services)", service_count);
