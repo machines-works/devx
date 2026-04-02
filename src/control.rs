@@ -7,6 +7,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 
 use crate::events::DevxEvent;
+use crate::orchestrator::OrchestratorCommand;
 
 #[derive(Debug, Deserialize)]
 struct ControlCommand {
@@ -22,7 +23,11 @@ pub fn socket_path(project_name: &str) -> PathBuf {
 /// Start the control socket server. Listens for JSON commands and emits
 /// DevxEvent variants. Runs until the sender is dropped or the task is
 /// cancelled.
-pub async fn serve(project_name: &str, event_tx: mpsc::Sender<DevxEvent>) -> Result<()> {
+pub async fn serve(
+    project_name: &str,
+    event_tx: mpsc::Sender<DevxEvent>,
+    cmd_tx: mpsc::Sender<OrchestratorCommand>,
+) -> Result<()> {
     let path = socket_path(project_name);
 
     // Remove stale socket file if it exists
@@ -32,7 +37,7 @@ pub async fn serve(project_name: &str, event_tx: mpsc::Sender<DevxEvent>) -> Res
 
     loop {
         let (stream, _) = listener.accept().await?;
-        if let Err(e) = handle_connection(stream, &event_tx).await {
+        if let Err(e) = handle_connection(stream, &event_tx, &cmd_tx).await {
             let _ = event_tx.try_send(DevxEvent::LogLine {
                 service: "devx".to_string(),
                 line: format!("[control] connection error: {}", e),
@@ -45,6 +50,7 @@ pub async fn serve(project_name: &str, event_tx: mpsc::Sender<DevxEvent>) -> Res
 async fn handle_connection(
     stream: UnixStream,
     event_tx: &mpsc::Sender<DevxEvent>,
+    cmd_tx: &mpsc::Sender<OrchestratorCommand>,
 ) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -55,7 +61,7 @@ async fn handle_connection(
         Ok(cmd) => match cmd.cmd.as_str() {
             "shutdown" => {
                 let _ = event_tx.send(DevxEvent::ControlShutdown).await;
-                r#"{"ok":true}"#
+                r#"{"ok":true}"#.to_string()
             }
             "restart" => {
                 if let Some(service) = cmd.service {
@@ -64,12 +70,20 @@ async fn handle_connection(
                             service: service.clone(),
                         })
                         .await;
-                    r#"{"ok":true}"#
+                    r#"{"ok":true}"#.to_string()
                 } else {
-                    r#"{"error":"restart requires a 'service' field"}"#
+                    r#"{"error":"restart requires a 'service' field"}"#.to_string()
                 }
             }
-            _ => r#"{"error":"unknown command"}"#,
+            "status" => {
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                let _ = cmd_tx.send(OrchestratorCommand::Status { reply: reply_tx }).await;
+                match reply_rx.await {
+                    Ok(status_json) => status_json,
+                    Err(_) => r#"{"error":"status channel closed"}"#.to_string(),
+                }
+            }
+            _ => r#"{"error":"unknown command"}"#.to_string(),
         },
         Err(e) => {
             // Write error inline since we can't use a formatted &str

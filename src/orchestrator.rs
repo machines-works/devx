@@ -310,8 +310,9 @@ impl Orchestrator {
         let ctrl_project = self.config.project.name.clone();
         let ctrl_tx = self.event_tx.clone();
         let ctrl_tx2 = self.event_tx.clone();
+        let ctrl_cmd_tx = self.cmd_tx.clone();
         tokio::spawn(async move {
-            if let Err(e) = control::serve(&ctrl_project, ctrl_tx).await {
+            if let Err(e) = control::serve(&ctrl_project, ctrl_tx, ctrl_cmd_tx).await {
                 let _ = ctrl_tx2.try_send(DevxEvent::LogLine {
                     service: "devx".to_string(),
                     line: format!("[control] socket error: {}", e),
