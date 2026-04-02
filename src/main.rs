@@ -175,6 +175,7 @@ fn cmd_up_daemon(config: DevxConfig, project_root: PathBuf, services: Vec<String
 
     let (event_tx, mut event_rx) = mpsc::channel(8192);
     let mut orchestrator = Orchestrator::new(config, project_root.clone(), event_tx);
+    let cmd_tx = orchestrator.cmd_sender();
     let filter = service_filter(services);
 
     let runtime = tokio::runtime::Runtime::new()?;
@@ -240,6 +241,9 @@ fn cmd_up_daemon(config: DevxConfig, project_root: PathBuf, services: Vec<String
                 }
             }
         }
+
+        // Tell orchestrator to gracefully stop all services (SIGTERM → 5s → SIGKILL)
+        let _ = cmd_tx.send(devx::orchestrator::OrchestratorCommand::Shutdown).await;
 
         let ts = daemon::format_timestamp(SystemTime::now());
         let _ = writeln!(log_file, "[{}] [devx] daemon stopped", ts);
@@ -358,10 +362,17 @@ fn cmd_status() -> Result<()> {
     }
 
     let rt = tokio::runtime::Runtime::new()?;
-    let response = rt.block_on(control::send_command(
-        &project_name,
-        r#"{"cmd":"status"}"#,
-    ))?;
+    let response = match rt.block_on(control::send_command(&project_name, r#"{"cmd":"status"}"#)) {
+        Ok(r) => r,
+        Err(_) => {
+            // Socket exists but nobody is listening — stale from a crash
+            println!("devx appears to have crashed (stale socket)");
+            println!("  cleaning up: {}", socket.display());
+            control::cleanup(&project_name);
+            daemon::cleanup_pid(&project_name);
+            return Ok(());
+        }
+    };
 
     let status: serde_json::Value = serde_json::from_str(response.trim())?;
 

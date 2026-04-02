@@ -86,6 +86,7 @@ pub fn daemonize(project_name: &str) -> Result<()> {
         libc::dup2(log_fd, libc::STDOUT_FILENO);
         libc::dup2(log_fd, libc::STDERR_FILENO);
     }
+    drop(log_file); // stdout/stderr now own the fd
 
     let child_pid = std::process::id();
     let mut f = fs::File::create(&pid_file)?;
