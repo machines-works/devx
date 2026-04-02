@@ -159,42 +159,73 @@
       animation: glitch-pink 8s infinite;
     }
 
+    /* First burst: big & aggressive (0-6%), repeats: subtler (50-53%) */
     @keyframes glitch-trigger {
-      0%, 2%    { transform: none; }
-      2.5%      { transform: skewX(-2deg) translateX(2px); }
-      3%        { transform: skewX(3deg) translateX(-1px); }
-      3.3%      { transform: none; }
-      3.5%      { transform: translateX(-3px); }
-      3.8%      { transform: skewX(-1deg) translateX(1px); }
-      4.2%      { transform: none; }
-      4.5%      { transform: skewX(2deg) translateX(-2px); }
+      0%        { transform: none; }
+      1%        { transform: skewX(-6deg) translateX(8px); }
+      1.5%      { transform: skewX(8deg) translateX(-6px); }
+      2%        { transform: translateX(10px) skewX(-3deg); }
+      2.3%      { transform: none; }
+      2.5%      { transform: skewX(5deg) translateX(-8px); }
+      3%        { transform: translateX(6px); }
+      3.2%      { transform: skewX(-7deg) translateX(-4px); }
+      3.5%      { transform: none; }
+      3.8%      { transform: translateX(5px) skewX(4deg); }
+      4%        { transform: skewX(-3deg) translateX(-10px); }
+      4.5%      { transform: translateX(3px); }
       5%        { transform: none; }
+      50%       { transform: none; }
+      50.5%     { transform: skewX(-2deg) translateX(3px); }
+      51%       { transform: skewX(3deg) translateX(-2px); }
+      51.5%     { transform: none; }
+      52%       { transform: translateX(-3px); }
+      52.5%     { transform: none; }
       100%      { transform: none; }
     }
 
     @keyframes glitch-cyan {
-      0%, 2%    { opacity: 0; clip-path: inset(0 0 100% 0); }
-      2.5%      { opacity: 0.8; clip-path: inset(20% 0 60% 0); transform: translateX(-4px); }
-      3%        { opacity: 0.6; clip-path: inset(50% 0 20% 0); transform: translateX(3px); }
-      3.3%      { opacity: 0; }
-      3.5%      { opacity: 0.7; clip-path: inset(10% 0 70% 0); transform: translateX(-5px); }
-      3.8%      { opacity: 0.5; clip-path: inset(60% 0 10% 0); transform: translateX(2px); }
-      4.2%      { opacity: 0; }
-      4.5%      { opacity: 0.6; clip-path: inset(30% 0 40% 0); transform: translateX(-3px); }
+      0%        { opacity: 0; clip-path: inset(0 0 100% 0); }
+      1%        { opacity: 1; clip-path: inset(15% 0 55% 0); transform: translateX(-10px); }
+      1.5%      { opacity: 0.9; clip-path: inset(60% 0 5% 0); transform: translateX(8px); }
+      2%        { opacity: 1; clip-path: inset(5% 0 75% 0); transform: translateX(-12px); }
+      2.3%      { opacity: 0; }
+      2.5%      { opacity: 0.9; clip-path: inset(30% 0 40% 0); transform: translateX(-8px); }
+      3%        { opacity: 1; clip-path: inset(70% 0 5% 0); transform: translateX(6px); }
+      3.2%      { opacity: 0.8; clip-path: inset(10% 0 60% 0); transform: translateX(-10px); }
+      3.5%      { opacity: 0; }
+      3.8%      { opacity: 0.9; clip-path: inset(45% 0 25% 0); transform: translateX(-7px); }
+      4%        { opacity: 1; clip-path: inset(80% 0 0% 0); transform: translateX(9px); }
+      4.5%      { opacity: 0.7; clip-path: inset(20% 0 50% 0); transform: translateX(-5px); }
       5%        { opacity: 0; clip-path: inset(0 0 100% 0); }
+      50%       { opacity: 0; }
+      50.5%     { opacity: 0.7; clip-path: inset(25% 0 55% 0); transform: translateX(-4px); }
+      51%       { opacity: 0.5; clip-path: inset(60% 0 20% 0); transform: translateX(3px); }
+      51.5%     { opacity: 0; }
+      52%       { opacity: 0.6; clip-path: inset(15% 0 65% 0); transform: translateX(-3px); }
+      52.5%     { opacity: 0; }
       100%      { opacity: 0; }
     }
 
     @keyframes glitch-pink {
-      0%, 2%    { opacity: 0; clip-path: inset(0 0 100% 0); }
-      2.5%      { opacity: 0.6; clip-path: inset(40% 0 30% 0); transform: translateX(4px); }
-      3%        { opacity: 0.8; clip-path: inset(10% 0 70% 0); transform: translateX(-2px); }
-      3.3%      { opacity: 0; }
-      3.5%      { opacity: 0.5; clip-path: inset(55% 0 15% 0); transform: translateX(5px); }
-      3.8%      { opacity: 0.7; clip-path: inset(25% 0 55% 0); transform: translateX(-3px); }
-      4.2%      { opacity: 0; }
-      4.5%      { opacity: 0.5; clip-path: inset(70% 0 5% 0); transform: translateX(4px); }
+      0%        { opacity: 0; clip-path: inset(0 0 100% 0); }
+      1%        { opacity: 0.9; clip-path: inset(40% 0 25% 0); transform: translateX(10px); }
+      1.5%      { opacity: 1; clip-path: inset(5% 0 70% 0); transform: translateX(-7px); }
+      2%        { opacity: 0.9; clip-path: inset(50% 0 20% 0); transform: translateX(12px); }
+      2.3%      { opacity: 0; }
+      2.5%      { opacity: 1; clip-path: inset(65% 0 10% 0); transform: translateX(9px); }
+      3%        { opacity: 0.8; clip-path: inset(20% 0 50% 0); transform: translateX(-6px); }
+      3.2%      { opacity: 0.9; clip-path: inset(75% 0 0% 0); transform: translateX(8px); }
+      3.5%      { opacity: 0; }
+      3.8%      { opacity: 0.8; clip-path: inset(10% 0 65% 0); transform: translateX(7px); }
+      4%        { opacity: 1; clip-path: inset(35% 0 35% 0); transform: translateX(-9px); }
+      4.5%      { opacity: 0.6; clip-path: inset(55% 0 20% 0); transform: translateX(5px); }
       5%        { opacity: 0; clip-path: inset(0 0 100% 0); }
+      50%       { opacity: 0; }
+      50.5%     { opacity: 0.5; clip-path: inset(50% 0 30% 0); transform: translateX(4px); }
+      51%       { opacity: 0.6; clip-path: inset(10% 0 70% 0); transform: translateX(-3px); }
+      51.5%     { opacity: 0; }
+      52%       { opacity: 0.5; clip-path: inset(40% 0 40% 0); transform: translateX(3px); }
+      52.5%     { opacity: 0; }
       100%      { opacity: 0; }
     }
 
