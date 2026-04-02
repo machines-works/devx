@@ -1,0 +1,401 @@
+# ALE Workflow Defaults
+# Override in your project's .claude/ale.config.yaml
+#
+# Config resolution:
+#   1. .claude/ale.config.yaml (project root)
+#   2. ~/.claude/ale/ale.defaults.yaml (this file, shipped with the package)
+#   3. Empty/auto-detect (for values not specified anywhere)
+#
+# Project config values override these defaults.
+# Empty strings or empty lists in project config = use these defaults.
+
+# --------------------------------------------------------------------------
+# Project identity
+# --------------------------------------------------------------------------
+project:
+  name: ""              # Auto-detected from git repo name if empty
+  description: ""       # One-line description for Codex reviews and team briefs
+  enabled: false        # Enable GitHub Project board integration
+  number: 0             # GitHub Project number (from the project URL, e.g. /projects/1)
+  org: ""               # Organization name for org-level projects (optional, omit for user projects)
+
+# --------------------------------------------------------------------------
+# Orchestration — controls for DAG-based squad execution (--team mode)
+# --------------------------------------------------------------------------
+orchestration:
+  max_concurrent_workers: 6   # Max workers running in parallel (default: 6)
+
+# --------------------------------------------------------------------------
+# Quality gates — commands agents run before final commits and task merges
+# --------------------------------------------------------------------------
+# Each gate has:
+#   name:    human-readable label
+#   command: shell command to run
+#   when:    "always" | "backend" | "frontend" | "auto-detect"
+#            auto-detect: run if the diff contains matching file patterns
+#
+# When empty, agents skip quality gates (not recommended).
+quality_gates: []
+  # Example:
+  # - name: "lint"
+  #   command: "npm run lint"
+  #   when: "always"
+  # - name: "test"
+  #   command: "npm test"
+  #   when: "always"
+  # - name: "build"
+  #   command: "npm run build"
+  #   when: "frontend"
+
+# Test framework — used by error parsing to select the right output parser.
+# Values: "jest" | "vitest" | "pytest" | "bats" | "go" | "auto"
+# When "auto" (default), agents detect from project files (package.json, go.mod, etc.)
+# See docs/ERROR-PARSING.md for parser details.
+test_framework: "auto"
+
+# File patterns used by "auto-detect" to classify changes:
+gate_patterns:
+  backend:
+    - "*.go"
+    - "*.py"
+    - "*.rs"
+    - "*.java"
+    - "*.rb"
+  frontend:
+    - "*.ts"
+    - "*.tsx"
+    - "*.js"
+    - "*.jsx"
+    - "*.vue"
+    - "*.svelte"
+    - "*.css"
+    - "*.scss"
+
+# --------------------------------------------------------------------------
+# Shared files — files that multiple agents may edit concurrently
+# --------------------------------------------------------------------------
+# Each entry has:
+#   path:                 relative path from project root
+#   strategy:             "append" | "regenerate" | "merge-additive"
+#   regenerate_command:   shell command (required when strategy is "regenerate")
+#   note:                 instructions for agents editing this file
+#
+# When empty, agents treat all files as independent (no special coordination).
+shared_files: []
+  # Example:
+  # - path: "src/routes/index.ts"
+  #   strategy: "append"
+  #   note: "Append new routes at end, don't reorder"
+  # - path: "package-lock.json"
+  #   strategy: "regenerate"
+  #   regenerate_command: "npm install"
+
+# --------------------------------------------------------------------------
+# Dev environment — shared runtime all agents use
+# --------------------------------------------------------------------------
+dev_environment:
+  # Named ports agents reference in prompts and tests
+  ports: {}
+    # Example:
+    # api: 8080
+    # ui: 3000
+    # db: 5432
+
+  # Hard rules agents must follow — injected into every teammate prompt
+  rules: []
+    # Example:
+    # - "DO NOT restart the dev server"
+    # - "DO NOT drop or reset databases"
+
+  # Command to start the dev environment (optional)
+  start_command: ""
+
+  # Command to stop the dev environment (optional)
+  stop_command: ""
+
+# --------------------------------------------------------------------------
+# Authentication — how agents authenticate for testing
+# --------------------------------------------------------------------------
+auth:
+  test_user: ""         # Email for UI test login (e.g., "dev@example.com")
+  method: ""            # "jwt" | "api-key" | "session" | "" (no auth)
+  notes: ""             # Extra auth instructions injected into agent prompts
+
+# --------------------------------------------------------------------------
+# Branch naming — prefixes for git branches
+# --------------------------------------------------------------------------
+branch_prefixes:
+  feature: "feat/"
+  fix: "fix/"
+  refactor: "refactor/"
+
+# --------------------------------------------------------------------------
+# Commit conventions
+# --------------------------------------------------------------------------
+commit:
+  co_author: "Co-Authored-By: Claude Code <noreply@anthropic.com>"
+  # Conventional commit prefixes agents use
+  prefixes:
+    - "feat"
+    - "fix"
+    - "refactor"
+    - "chore"
+    - "docs"
+    - "test"
+
+# --------------------------------------------------------------------------
+# Paths — where workflow artifacts live
+# --------------------------------------------------------------------------
+paths:
+  dumps: ".ale/dumps"                     # Session dump files (DUMP-*.md)
+  dump_index: ".ale/dumps/DUMP-INDEX.md"    # Dump index table
+  briefs: "docs"                          # Milestone briefs (docs/<milestone>/)
+  roadmap: "docs/workflow/ROADMAP.md"     # DEPRECATED: Use project.enabled + GitHub Projects instead
+  codebase: ".planning/codebase"          # Codebase map docs (STACK, ARCHITECTURE, etc.)
+  changelog: "CHANGELOG.md"              # Changelog file
+  changelog_command: ""                   # Command to regenerate changelog
+
+# --------------------------------------------------------------------------
+# Codex review — settings for the /ale:review and dispatch Codex step
+# --------------------------------------------------------------------------
+codex:
+  enabled: true           # Set false to skip Codex review steps
+  # Context string prepended to every Codex review prompt
+  project_context: ""
+    # Example: "Go + TypeScript AI workforce platform (Go 1.26, TanStack Start)"
+  # Extra checks to include in review prompts (appended to default checks)
+  extra_checks: []
+    # Example:
+    # - "API contract consistency (swagger annotations match handler signatures)"
+    # - "Restate durable execution patterns"
+
+# --------------------------------------------------------------------------
+# Review strategy — how code review works
+# --------------------------------------------------------------------------
+# Controls how code review is performed across the workflow:
+#   "codex"  — Workers self-review with Codex MCP before push.
+#              /ale:review spawns codex-reviewer agent with Codex MCP.
+#   "native" — Workers skip Codex self-review.
+#              Squad lead spawns a native Claude reviewer teammate.
+#              /ale:review does inline diff review (no Codex MCP).
+review:
+  strategy: "codex"
+  timeout: 120             # Seconds to wait for Codex MCP response before surfacing partial results
+  model: ""                # Codex model override ("opus", "sonnet", or "" for default)
+  prompt_template: ""      # Custom review prompt template (overrides default checklist)
+
+# --------------------------------------------------------------------------
+# Protected paths — directories agents must never modify
+# --------------------------------------------------------------------------
+# These are always protected (hardcoded, cannot be overridden):
+#   ~/.claude/commands/
+#   ~/.claude/agents/
+#   ~/.claude/skills/
+#   ~/.claude/settings.json
+#   ~/.claude/settings.local.json
+#
+# Add project-specific protected paths here:
+protected_paths: []
+  # Example:
+  # - "deploy/production/"
+  # - ".github/workflows/"
+
+# --------------------------------------------------------------------------
+# Context watchdog — warns agents before context window exhaustion
+# --------------------------------------------------------------------------
+# The watchdog counts tool calls per session and emits warnings when
+# thresholds are exceeded, suggesting /compact with a handoff summary.
+# This gives agents a chance to compact proactively instead of relying
+# on auto-compaction (which loses the handoff summary).
+context_watchdog:
+  warn_threshold: 80        # Tool call count to trigger first warning
+  critical_threshold: 120   # Tool call count for critical (urgent) warning
+  remind_interval: 20       # Re-warn every N calls after first warning
+
+# --------------------------------------------------------------------------
+# Threshold reactor (ale-react) — event-driven triggers
+# --------------------------------------------------------------------------
+# ale-react evaluates these thresholds after every event and dispatches
+# actions with cooldown-based deduplication. Each threshold has:
+#   - A trigger condition (count, time, drift)
+#   - An action written to .ale/cache/pending-actions.jsonl
+#   - A cooldown period (seconds) to prevent duplicate fires
+thresholds:
+  commits_without_pr: 10            # Commits on branch without PR before review_checkpoint
+  commits_without_pr_cooldown: 3600 # Cooldown for review_checkpoint (seconds)
+  branch_inactivity_minutes: 30     # Minutes of no commits before health_check
+  branch_inactivity_cooldown: 1800  # Cooldown for health_check (seconds)
+  main_drift_commits: 5             # Commits behind origin/main before rebase_reminder
+  main_drift_cooldown: 1800         # Cooldown for rebase_reminder (seconds)
+  pr_merge_velocity: 3              # PRs merged per hour before integration_test suggestion
+  pr_merge_velocity_cooldown: 3600  # Cooldown for integration_test (seconds)
+  blocker_stale_minutes: 15         # Minutes after blocker with no progress before escalation
+  blocker_stale_cooldown: 3600      # Cooldown for blocker_escalation (seconds)
+
+# --------------------------------------------------------------------------
+# Hooks — optional workflow hooks
+# --------------------------------------------------------------------------
+hooks:
+  statusline: true        # Enable custom statusline display
+  heartbeat: true         # Enable team heartbeat tracking
+  codex_logging: true     # Log Codex MCP calls for audit
+  otel_review_export: true  # Export Codex review data to OTEL collector
+  pre_compact_dump: true  # Auto-dump session state before context compaction
+  session_preflight: true  # Run environment pre-flight checks on session start
+  verify_branch: true     # Verify branch/worktree after git commit
+  session_correlation: true # Emit OTEL session correlation at session start
+  context_watchdog: true  # Warn agents before context window exhaustion
+  rogue_detection: true   # Scan for rogue agents (time, inactivity, scope)
+
+# --------------------------------------------------------------------------
+# Preview — deploy-preview / ephemeral environment integration
+# --------------------------------------------------------------------------
+preview:
+  enabled: false          # Enable deploy-preview integration
+  label: ""               # Label shown in PR comments (e.g., "Preview")
+  url_pattern: ""         # URL pattern with placeholders (e.g., "https://{branch}.preview.example.com")
+
+# --------------------------------------------------------------------------
+# Heartbeat — liveness detection thresholds for squad monitoring
+# --------------------------------------------------------------------------
+# Used by `heartbeat.sh read` to classify squad liveness.
+# Override via env vars ALE_HEARTBEAT_STALE_SECS / ALE_HEARTBEAT_DEAD_SECS
+# or in your project's ale.config.yaml.
+heartbeat:
+  stale_secs: 300         # Seconds before heartbeat is "stale" (default: 5 min)
+  dead_secs: 1800         # Seconds before heartbeat is "dead"  (default: 30 min)
+
+# --------------------------------------------------------------------------
+# Self-healing — strategy switching and escalation after repeated failures
+# --------------------------------------------------------------------------
+# Controls how agents handle repeated fix failures.
+# Agents track failed strategies and switch approaches automatically.
+# After exhausting all strategies, they escalate to a human.
+self_heal:
+  max_retries_per_strategy: 3   # Attempts within one strategy before forced switch
+  max_total_retries: 5          # Total attempts across all strategies before escalation
+  escalation: "needs-human"     # GitHub label applied when escalating to human
+  ci_feedback: true             # Enable CI failure -> agent feedback loop
+  max_ci_retries: 3             # Max auto-fix iterations before adding needs-human label
+  parse_ci_output: true         # Include structured error parsing in CI feedback comments
+
+# --------------------------------------------------------------------------
+# Rogue detection — detect agents exceeding time, inactivity, or scope limits
+# --------------------------------------------------------------------------
+# Used by `rogue-detector.sh scan` to classify agent health.
+# Override via env vars (ALE_ROGUE_*) or in your project's ale.config.yaml.
+rogue_detection:
+  enabled: true
+  max_duration_dispatch: 1800       # 30 minutes — single-task IC agents
+  max_duration_squad_worker: 3600   # 60 minutes — multi-step squad workers
+  max_duration_squad_lead: 7200     # 120 minutes — orchestration + wait time
+  max_duration_discovery: 2700      # 45 minutes — research/exploration tasks
+  inactivity_threshold: 900         # 15 minutes without a commit
+  inactivity_grace_period: 600      # 10 minutes initial grace (setup/planning)
+  scope_check: true                 # Detect changes to protected/out-of-scope paths
+  auto_kill: false                  # Disabled by default — opt-in only
+  auto_kill_threshold: 1.5          # Kill at 150% of max duration (critical)
+
+# --------------------------------------------------------------------------
+# Budget — session cost monitoring and enforcement
+# --------------------------------------------------------------------------
+# Tracks API cost via OTEL token usage data in ClickHouse.
+# Requires ClickStack for cost queries. Preflight display works via env vars.
+#
+# When enabled, orchestrators set ALE_BUDGET_LIMIT / ALE_BUDGET_CURRENT
+# env vars on spawned workers. Session preflight shows budget status.
+# Tribe status includes per-squad cost breakdown from ClickHouse.
+budget:
+  enabled: false                    # Master toggle — all budget features no-op when false
+  per_squad: 50.00                  # Max cost in USD per squad session
+  per_dispatch: 10.00               # Max cost in USD per single dispatch
+  warn_threshold: 0.8               # Fraction of budget triggering warning (0.8 = 80%)
+  currency: "USD"                   # Display label (calculations always use USD)
+
+# --------------------------------------------------------------------------
+# Discord integration
+# --------------------------------------------------------------------------
+discord:
+  token: null                    # Required: your Discord bot token (or set $DISCORD_TOKEN)
+  channel_ids: []                # Required: list of channel IDs to listen on
+  allowed_users: []              # Optional: restrict to Discord user IDs or usernames
+  allowed_roles: []              # Optional: restrict to Discord role IDs or role names
+  allow_all: false               # Explicit opt-in: allow all channel members (requires no allowlist)
+  startup_command: "/ale:tribe"  # Command sent to Claude Code on startup
+  working_dir: "."               # Working directory for the Claude Code session
+
+# --------------------------------------------------------------------------
+# Terminal multiplexer — how agents spawn in parallel
+# --------------------------------------------------------------------------
+# Controls whether ale start uses tmux for agent spawning.
+#   "tmux"   — spawn agents in tmux panes/windows (recommended, requires tmux)
+#   "native" — spawn agents in native terminal tabs (legacy behavior)
+terminal:
+  multiplexer: "tmux"
+
+# --------------------------------------------------------------------------
+# Entire.io — session transcripts, line attribution, checkpoint/rewind
+# --------------------------------------------------------------------------
+# Entire.io hooks into git to capture AI agent session transcripts and
+# per-line code attribution. Data is stored on an orphan branch
+# (entire/checkpoints/v1) — non-intrusive to working branches.
+#
+# Requires: `entire` CLI (https://entire.io)
+# See docs/design/entire-io-spike.md for compatibility analysis.
+entire:
+  enabled: false              # Enable Entire.io integration
+  telemetry: false            # Anonymous usage telemetry to Entire.io (recommended: false)
+  skip_push_sessions: false   # Skip pushing session logs on git push (reduces ~2.5s push overhead)
+
+# --------------------------------------------------------------------------
+# Sovereign agent — autonomous cron-driven meta-orchestrator
+# --------------------------------------------------------------------------
+# The sovereign agent runs on a schedule, reads project state (issues,
+# PRs, CI status), and dispatches squads autonomously. All operations
+# go through the standard ale-workflow safety gates.
+sovereign:
+  enabled: false                        # Master toggle — sovereign loop is no-op when false
+  schedule: "*/30 * * * *"             # Cron expression for the sovereign loop (default: every 30 min)
+  state_dir: "~/.claude/sovereign"     # Directory for sovereign state, logs, and feed
+
+  # Event feed — append-only log of sovereign decisions and actions
+  feed:
+    enabled: true                      # Enable event feed logging
+    max_events: 1000                   # Max events before oldest are pruned
+    rotation: 100                      # Number of cycle logs to keep before rotation
+
+  # Safety constraints — guardrails for autonomous operation
+  safety:
+    require_tests: true                # Squads must pass quality gates before merge
+    require_review: true               # Squads must pass code review before merge
+    auto_merge: false                  # Auto-merge PRs that pass all gates (opt-in only)
+    rollback_tags: true                # Tag pre-merge state for easy rollback
+    max_concurrent_squads: 3           # Max squads the sovereign can run in parallel
+    cost_limit_per_cycle: 0            # Max USD cost per cycle (0 = no limit)
+
+  # Tribe configuration — which tribes the sovereign can activate
+  tribes:
+    eng:
+      enabled: true                    # Engineering tribe (issues, PRs, CI fixes)
+    product:
+      enabled: false                   # Product tribe (roadmap, specs, design docs)
+
+# --------------------------------------------------------------------------
+# Agent Browser — browser testing via agent-browser skill
+# --------------------------------------------------------------------------
+# Enables browser-based testing for frontend projects using the agent-browser
+# skill (vercel-labs/agent-browser). Auto-detected during `ale init` when
+# package.json contains frontend dependencies (react, next, vue, etc.).
+#
+# Requires: `npx skills add vercel-labs/agent-browser --skill agent-browser`
+# See: https://github.com/vercel-labs/agent-browser
+agent_browser:
+  enabled: false              # Enable agent-browser integration
+  headless: true              # Run browser in headless mode (recommended for CI/agents)
+  allowed_origins: []         # Restrict browser navigation (empty = allow all)
+    # Example:
+    # - "http://localhost:3000"
+    # - "http://localhost:8080"
+  default_viewport:
+    width: 1280
+    height: 720

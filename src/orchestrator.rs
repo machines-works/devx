@@ -23,9 +23,14 @@ use crate::tls;
 use crate::watcher;
 
 pub enum OrchestratorCommand {
-    Restart { service: String },
+    Restart {
+        service: String,
+    },
     ReloadConfig,
     Shutdown,
+    Status {
+        reply: tokio::sync::oneshot::Sender<String>,
+    },
 }
 
 pub struct Orchestrator {
@@ -346,8 +351,9 @@ impl Orchestrator {
         let ctrl_project = self.config.project.name.clone();
         let ctrl_tx = self.event_tx.clone();
         let ctrl_tx2 = self.event_tx.clone();
+        let ctrl_cmd_tx = self.cmd_tx.clone();
         tokio::spawn(async move {
-            if let Err(e) = control::serve(&ctrl_project, ctrl_tx).await {
+            if let Err(e) = control::serve(&ctrl_project, ctrl_tx, ctrl_cmd_tx).await {
                 let _ = ctrl_tx2.try_send(DevxEvent::LogLine {
                     service: "devx".to_string(),
                     line: format!("[control] socket error: {}", e),
@@ -404,6 +410,27 @@ impl Orchestrator {
                             });
                         }
                     }
+                }
+                OrchestratorCommand::Status { reply } => {
+                    let statuses: Vec<serde_json::Value> = self
+                        .processes
+                        .iter()
+                        .map(|(name, proc)| {
+                            let uptime = proc.started_at.map(|t| t.elapsed().as_secs());
+                            serde_json::json!({
+                                "name": name,
+                                "state": proc.state.label(),
+                                "port": self.actual_ports.get(name),
+                                "proxy_port": self.proxy_ports.get(name),
+                                "uptime_secs": uptime,
+                            })
+                        })
+                        .collect();
+                    let response = serde_json::json!({
+                        "services": statuses,
+                        "project": self.config.project.name,
+                    });
+                    let _ = reply.send(response.to_string());
                 }
                 OrchestratorCommand::Shutdown => {
                     let _ = self.shutdown().await;

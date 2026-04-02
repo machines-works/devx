@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# ale-emit -- Append-only event recording for ALE Workflow
+#
+# Usage:
+#   ale-emit <event_type> [key=value ...]
+#
+# Examples:
+#   ale-emit commit sha=abc123 branch=feat/auth files_changed=3
+#   ale-emit push branch=feat/auth commit_count=7
+#   ale-emit agent_start
+#   ale-emit pr_merged pr=42 branch=feat/auth
+#   ale-emit context_warning level=warn tool_calls=80
+#
+# Events are written to .ale/events/YYYY-MM-DD.jsonl (one file per day).
+# Each event is a single JSON line with: timestamp, type, and key-value payload.
+#
+# Atomic writes: Each event is written in a single write(2) call under
+# PIPE_BUF (4096 bytes on POSIX), ensuring concurrent agents don't
+# interleave partial lines.
+#
+# After recording, kicks off ale-react in background (if available).
+#
+# Performance target: < 100ms total.
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+# Find the .ale directory (walk up from CWD to find project root)
+find_ale_dir() {
+  local dir="$PWD"
+  while [ "$dir" != "/" ]; do
+    if [ -d "$dir/.ale" ]; then
+      echo "$dir/.ale"
+      return
+    fi
+    dir="$(dirname "$dir")"
+  done
+  # Fallback: create in current project
+  local root
+  root=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+  echo "$root/.ale"
+}
+
+ALE_DIR="${ALE_DIR:-$(find_ale_dir)}"
+EVENTS_DIR="$ALE_DIR/events"
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+
+if [ $# -lt 1 ]; then
+  echo "Usage: ale-emit <event_type> [key=value ...]" >&2
+  exit 1
+fi
+
+EVENT_TYPE="$1"
+shift
+
+# ---------------------------------------------------------------------------
+# Build JSON event
+# ---------------------------------------------------------------------------
+
+# JSON-escape a string (escape backslashes, then double quotes)
+json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  printf '%s' "$s"
+}
+
+# Timestamp in ISO 8601
+TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+DATE_TAG=$(date -u +%Y-%m-%d)
+
+# Session identity: PPID is Claude Code node process, or use env override
+SESSION_ID="${ALE_SESSION_ID:-$PPID}"
+
+# Git context (best-effort, fast)
+GIT_BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo "")
+GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
+HOSTNAME_SHORT=$(hostname -s 2>/dev/null || echo "unknown")
+
+# Escape all interpolated values
+EVENT_TYPE_ESC=$(json_escape "$EVENT_TYPE")
+SESSION_ID_ESC=$(json_escape "$SESSION_ID")
+HOSTNAME_ESC=$(json_escape "$HOSTNAME_SHORT")
+GIT_BRANCH_ESC=$(json_escape "$GIT_BRANCH")
+
+# Build payload from key=value args
+PAYLOAD=""
+for arg in "$@"; do
+  key="${arg%%=*}"
+  value="${arg#*=}"
+  key=$(json_escape "$key")
+  value=$(json_escape "$value")
+  if [ -n "$PAYLOAD" ]; then
+    PAYLOAD="$PAYLOAD,"
+  fi
+  PAYLOAD="$PAYLOAD\"$key\":\"$value\""
+done
+
+# Construct the JSON line
+EVENT_JSON="{\"ts\":\"$TIMESTAMP\",\"type\":\"$EVENT_TYPE_ESC\",\"session\":\"$SESSION_ID_ESC\",\"host\":\"$HOSTNAME_ESC\""
+if [ -n "$GIT_BRANCH" ]; then
+  EVENT_JSON="$EVENT_JSON,\"branch\":\"$GIT_BRANCH_ESC\""
+fi
+if [ -n "$PAYLOAD" ]; then
+  EVENT_JSON="$EVENT_JSON,$PAYLOAD"
+fi
+EVENT_JSON="$EVENT_JSON}"
+
+# ---------------------------------------------------------------------------
+# Write event (atomic append)
+# ---------------------------------------------------------------------------
+
+# Ensure events directory exists
+mkdir -p "$EVENTS_DIR"
+
+EVENT_FILE="$EVENTS_DIR/$DATE_TAG.jsonl"
+
+# Single printf + redirect = single write(2) syscall for lines < PIPE_BUF
+# This guarantees atomic append even with concurrent writers (POSIX)
+printf '%s\n' "$EVENT_JSON" >> "$EVENT_FILE"
+
+# ---------------------------------------------------------------------------
+# Kick off ale-react in background (stub -- see #142)
+# ---------------------------------------------------------------------------
+
+ALE_REACT="$ALE_DIR/bin/ale-react"
+if [ -x "$ALE_REACT" ]; then
+  "$ALE_REACT" "$EVENT_TYPE" &>/dev/null &
+  disown 2>/dev/null || true
+fi
+
+exit 0
