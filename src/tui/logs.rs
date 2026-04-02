@@ -79,8 +79,8 @@ pub fn render_logs(
         " Logs ".to_string()
     };
 
-    let paragraph = Paragraph::new(visible_lines)
-        .block(Block::default().borders(Borders::TOP).title(title));
+    let paragraph =
+        Paragraph::new(visible_lines).block(Block::default().borders(Borders::TOP).title(title));
 
     frame.render_widget(paragraph, area);
 }

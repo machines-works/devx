@@ -1,4 +1,4 @@
-use crate::config::{interpolate, ServiceConfig};
+use crate::config::{ServiceConfig, interpolate};
 use crate::detect::Framework;
 use crate::events::{DevxEvent, ServiceState};
 use crate::ports::PortAllocation;
@@ -50,9 +50,13 @@ impl ManagedProcess {
         // Auto-detect framework and inject port if cmd doesn't already use ${port}
         let actual_port = actual_ports.get(&self.name).copied().unwrap_or(0);
         let framework = Framework::detect(&cmd, &work_dir);
-        let cmd = framework
-            .inject_port_flag(&cmd, actual_port)
-            .unwrap_or(cmd);
+        // Skip port injection for self-managed frameworks (e.g., Encore) or
+        // when the config explicitly sets managed = false
+        let cmd = if framework.self_managed() || !self.config.managed {
+            cmd
+        } else {
+            framework.inject_port_flag(&cmd, actual_port).unwrap_or(cmd)
+        };
 
         let mut command = tokio::process::Command::new("sh");
         command
@@ -75,13 +79,33 @@ impl ManagedProcess {
             });
         }
 
+        // Load .env file if specified
+        if let Some(env_file) = &self.config.env_file {
+            let env_path = work_dir.join(env_file);
+            if let Ok(iter) = dotenvy::from_path_iter(&env_path) {
+                for item in iter.flatten() {
+                    let (key, val) = item;
+                    // Don't override explicit env entries from devx.toml
+                    if !self.config.env.contains_key(&key) {
+                        let interpolated = interpolate(&val, &self.name, actual_ports, proxy_ports);
+                        command.env(key, interpolated);
+                    }
+                }
+            }
+        }
+
         for (key, val) in &self.config.env {
             let interpolated_val = interpolate(val, &self.name, actual_ports, proxy_ports);
             command.env(key, interpolated_val);
         }
 
-        // Inject PORT env var for frameworks that use it (unless already set in config)
-        if framework.injects_port_env() && !self.config.env.contains_key("PORT") {
+        // Inject PORT env var for frameworks that use it (unless already set in config
+        // or the service is self-managed)
+        if framework.injects_port_env()
+            && self.config.managed
+            && !framework.self_managed()
+            && !self.config.env.contains_key("PORT")
+        {
             command.env("PORT", actual_port.to_string());
         }
 
@@ -89,7 +113,9 @@ impl ManagedProcess {
 
         // Capture the child PID before we hand off the Child handle.
         // Since we called setsid(), the child PID is also the process group ID (PGID).
-        let child_pid = child.id().expect("child should have a PID right after spawn");
+        let child_pid = child
+            .id()
+            .expect("child should have a PID right after spawn");
 
         if let Some(stdout) = child.stdout.take() {
             let service = self.name.clone();
@@ -133,9 +159,11 @@ impl ManagedProcess {
         });
 
         let service = self.name.clone();
-        let health_url = self.config.health.as_ref().map(|h| {
-            interpolate(h, &self.name, actual_ports, proxy_ports)
-        });
+        let health_url = self
+            .config
+            .health
+            .as_ref()
+            .map(|h| interpolate(h, &self.name, actual_ports, proxy_ports));
         let tx = event_tx.clone();
         let started_at = self.started_at;
 
@@ -209,11 +237,8 @@ impl ManagedProcess {
             }
 
             // Wait up to 5 seconds for the child to exit gracefully.
-            let graceful = tokio::time::timeout(
-                tokio::time::Duration::from_secs(5),
-                child.wait(),
-            )
-            .await;
+            let graceful =
+                tokio::time::timeout(tokio::time::Duration::from_secs(5), child.wait()).await;
 
             if graceful.is_err() {
                 // Timeout expired — escalate to SIGKILL on the process group.
@@ -223,11 +248,8 @@ impl ManagedProcess {
                     }
                 }
                 // Reap the zombie (with a timeout so we never hang).
-                let _ = tokio::time::timeout(
-                    tokio::time::Duration::from_secs(2),
-                    child.wait(),
-                )
-                .await;
+                let _ =
+                    tokio::time::timeout(tokio::time::Duration::from_secs(2), child.wait()).await;
             }
         }
         self.pid = None;

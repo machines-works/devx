@@ -20,6 +20,12 @@ pub struct PortAllocator {
     allocated: HashSet<u16>,
 }
 
+impl Default for PortAllocator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PortAllocator {
     pub fn new() -> Self {
         Self {
@@ -34,10 +40,9 @@ impl PortAllocator {
     pub fn allocate(&mut self, service: &str, preferred: u16) -> Result<PortAllocation> {
         match TcpListener::bind(("127.0.0.1", preferred)) {
             Ok(listener) => {
-                let addr = listener.local_addr().context(format!(
-                    "service '{}': could not get local addr",
-                    service
-                ))?;
+                let addr = listener
+                    .local_addr()
+                    .context(format!("service '{}': could not get local addr", service))?;
                 self.allocated.insert(addr.port());
                 Ok(PortAllocation {
                     preferred: Some(preferred),
@@ -46,10 +51,8 @@ impl PortAllocator {
                 })
             }
             Err(_) => {
-                let listener = TcpListener::bind(("127.0.0.1", 0)).context(format!(
-                    "service '{}': could not bind any port",
-                    service
-                ))?;
+                let listener = TcpListener::bind(("127.0.0.1", 0))
+                    .context(format!("service '{}': could not bind any port", service))?;
                 let addr = listener.local_addr()?;
                 self.allocated.insert(addr.port());
                 Ok(PortAllocation {

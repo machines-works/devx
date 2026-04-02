@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Kahn's topological sort returning waves (parallel batches).

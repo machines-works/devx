@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use tokio::sync::mpsc;
 
@@ -34,17 +34,24 @@ enum Commands {
     },
     /// Validate devx.toml and check infra
     Check,
+    /// Show whether devx is running for this project
+    Status,
     /// Trust the devx local CA in the system certificate store
     Trust,
 }
 
 fn main() -> Result<()> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls crypto provider");
+
     let cli = Cli::parse();
     match cli.command {
         Commands::Up { services } => cmd_up(services),
         Commands::Down => cmd_down(),
         Commands::Restart { service } => cmd_restart(service),
         Commands::Check => cmd_check(),
+        Commands::Status => cmd_status(),
         Commands::Trust => cmd_trust(),
     }
 }
@@ -145,6 +152,30 @@ fn cmd_restart(service: String) -> Result<()> {
         println!("{} restarted", service);
     } else {
         eprintln!("unexpected response: {}", response.trim());
+    }
+
+    Ok(())
+}
+
+fn cmd_status() -> Result<()> {
+    let project_root = find_project_root()?;
+    let config = DevxConfig::load(&project_root.join("devx.toml"))?;
+    let sock = control::socket_path(&config.project.name);
+
+    if sock.exists() {
+        println!("devx is running (project: {})", config.project.name);
+        println!("socket: {}", sock.display());
+        println!(
+            "services: {}",
+            config
+                .services
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    } else {
+        println!("devx is not running (project: {})", config.project.name);
     }
 
     Ok(())

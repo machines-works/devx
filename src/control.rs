@@ -42,10 +42,7 @@ pub async fn serve(project_name: &str, event_tx: mpsc::Sender<DevxEvent>) -> Res
     }
 }
 
-async fn handle_connection(
-    stream: UnixStream,
-    event_tx: &mpsc::Sender<DevxEvent>,
-) -> Result<()> {
+async fn handle_connection(stream: UnixStream, event_tx: &mpsc::Sender<DevxEvent>) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
     let mut line = String::new();
@@ -54,16 +51,14 @@ async fn handle_connection(
     let resp = match serde_json::from_str::<ControlCommand>(line.trim()) {
         Ok(cmd) => match cmd.cmd.as_str() {
             "shutdown" => {
-                let _ = event_tx.send(DevxEvent::ControlShutdown).await;
+                let _ = event_tx.try_send(DevxEvent::ControlShutdown);
                 r#"{"ok":true}"#
             }
             "restart" => {
                 if let Some(service) = cmd.service {
-                    let _ = event_tx
-                        .send(DevxEvent::ControlRestart {
-                            service: service.clone(),
-                        })
-                        .await;
+                    let _ = event_tx.try_send(DevxEvent::ControlRestart {
+                        service: service.clone(),
+                    });
                     r#"{"ok":true}"#
                 } else {
                     r#"{"error":"restart requires a 'service' field"}"#

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use notify::RecursiveMode;
-use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
+use notify_debouncer_mini::{DebouncedEventKind, new_debouncer};
 use tokio::sync::mpsc;
 
 use crate::events::DevxEvent;
@@ -46,9 +46,9 @@ pub fn start_watcher(
                 Err(_) => return,
             };
 
-            let dominated = events.iter().any(|e| {
-                e.kind == DebouncedEventKind::Any && !should_ignore(&e.path)
-            });
+            let dominated = events
+                .iter()
+                .any(|e| e.kind == DebouncedEventKind::Any && !should_ignore(&e.path));
 
             if dominated {
                 let _ = tx.try_send(DevxEvent::FileChanged {
@@ -58,7 +58,9 @@ pub fn start_watcher(
         },
     )?;
 
-    debouncer.watcher().watch(&watch_dir, RecursiveMode::Recursive)?;
+    debouncer
+        .watcher()
+        .watch(&watch_dir, RecursiveMode::Recursive)?;
 
     // Leak the debouncer so it lives for the process lifetime.
     // devx services run until the process exits, so there is no

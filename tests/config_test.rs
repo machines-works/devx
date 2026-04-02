@@ -1,4 +1,4 @@
-use devx::config::{interpolate, DevxConfig};
+use devx::config::{DevxConfig, interpolate};
 use std::collections::HashMap;
 
 #[test]
@@ -95,7 +95,8 @@ port = 8080
     assert!(diff.added.is_empty());
     assert!(diff.removed.is_empty());
     assert!(diff.changed.is_empty());
-    assert_eq!(diff.unchanged, vec!["api"]);
+    assert_eq!(diff.unchanged.len(), 1);
+    assert!(diff.unchanged.contains(&"api".to_string()));
 }
 
 #[test]

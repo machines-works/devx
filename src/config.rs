@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
@@ -45,6 +45,12 @@ pub struct ServiceConfig {
     pub depends_on: Vec<String>,
     #[serde(default = "default_true")]
     pub watch: bool,
+    /// Optional .env file path (relative to service dir or project root)
+    pub env_file: Option<String>,
+    /// When false, devx won't allocate a random port or inject PORT — the service
+    /// manages its own port. The `port` field is treated as the actual listening port.
+    #[serde(default = "default_true")]
+    pub managed: bool,
 }
 
 impl DevxConfig {

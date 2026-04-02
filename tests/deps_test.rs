@@ -52,10 +52,7 @@ fn test_cycle_detected() {
     let g = graph(&[("a", &["b"]), ("b", &["a"])]);
     let result = resolve_order(&g);
     assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("cycle"));
+    assert!(result.unwrap_err().to_string().contains("cycle"));
 }
 
 #[test]
