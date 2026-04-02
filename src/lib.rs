@@ -6,6 +6,7 @@ pub mod detect;
 pub mod events;
 pub mod git;
 pub mod infra;
+pub mod init;
 pub mod orchestrator;
 pub mod ports;
 pub mod process;

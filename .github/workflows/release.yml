@@ -70,7 +70,23 @@ jobs:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
 
-      - name: Create release
+      - name: Upload to Vercel Blob
+        env:
+          BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          for dir in devx-darwin-arm64 devx-linux-x86_64 devx-linux-arm64; do
+            file="${dir}/${dir}.tar.gz"
+            pathname="releases/${TAG}/${dir}.tar.gz"
+            echo "Uploading ${file} -> ${pathname}"
+            curl -X PUT "https://blob.vercel-storage.com/${pathname}" \
+              -H "Authorization: Bearer ${BLOB_READ_WRITE_TOKEN}" \
+              -H "x-content-type: application/gzip" \
+              -H "x-add-random-suffix: false" \
+              --data-binary "@${file}"
+          done
+
+      - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           files: |

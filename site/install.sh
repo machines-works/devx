@@ -1,8 +1,9 @@
 #!/bin/sh
 set -e
 
-REPO="machines-works/devx"
-INSTALL_DIR="/usr/local/bin"
+VERSION="0.1.0"
+BASE_URL="https://devx.machines.works/releases"
+INSTALL_DIR="$HOME/.devx/bin"
 
 # Detect OS
 OS="$(uname -s)"
@@ -27,18 +28,9 @@ case "$ARCH" in
 esac
 
 ARTIFACT="devx-${OS}-${ARCH}"
+URL="${BASE_URL}/v${VERSION}/${ARTIFACT}.tar.gz"
 
-# Get latest release tag
-TAG=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | cut -d'"' -f4)
-
-if [ -z "$TAG" ]; then
-  echo "error: could not determine latest release" >&2
-  exit 1
-fi
-
-URL="https://github.com/${REPO}/releases/download/${TAG}/${ARTIFACT}.tar.gz"
-
-echo "devx ${TAG} (${OS}/${ARCH})"
+echo "devx v${VERSION} (${OS}/${ARCH})"
 echo "downloading ${URL}..."
 
 TMPDIR=$(mktemp -d)
@@ -47,16 +39,33 @@ trap 'rm -rf "$TMPDIR"' EXIT
 curl -fsSL "$URL" -o "${TMPDIR}/${ARTIFACT}.tar.gz"
 tar -xzf "${TMPDIR}/${ARTIFACT}.tar.gz" -C "$TMPDIR"
 
-# Install — try /usr/local/bin, fall back to ~/.local/bin
-if [ -w "$INSTALL_DIR" ]; then
-  mv "${TMPDIR}/devx" "${INSTALL_DIR}/devx"
-else
-  echo "installing to ${INSTALL_DIR} (requires sudo)..."
-  sudo mv "${TMPDIR}/devx" "${INSTALL_DIR}/devx"
-fi
-
+# Install to ~/.devx/bin (no sudo needed)
+mkdir -p "$INSTALL_DIR"
+mv "${TMPDIR}/devx" "${INSTALL_DIR}/devx"
 chmod +x "${INSTALL_DIR}/devx"
 
+# Add to PATH if not already there
+add_to_path() {
+  local rc="$1"
+  if [ -f "$rc" ]; then
+    if ! grep -q '\.devx/bin' "$rc" 2>/dev/null; then
+      echo '' >> "$rc"
+      echo '# devx' >> "$rc"
+      echo 'export PATH="$HOME/.devx/bin:$PATH"' >> "$rc"
+    fi
+  fi
+}
+
+case "$SHELL" in
+  */zsh)  add_to_path "$HOME/.zshrc" ;;
+  */bash) add_to_path "$HOME/.bashrc" ;;
+  *)      add_to_path "$HOME/.profile" ;;
+esac
+
 echo ""
-echo "devx installed to ${INSTALL_DIR}/devx"
-echo "run 'devx up' in any project with a devx.toml"
+echo "devx v${VERSION} installed to ${INSTALL_DIR}/devx"
+echo ""
+echo "Next steps:"
+echo "  1. Restart your shell or run: export PATH=\"\$HOME/.devx/bin:\$PATH\""
+echo "  2. cd into your project and run: devx init"
+echo "  3. Start your stack: devx up"

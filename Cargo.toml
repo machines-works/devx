@@ -26,6 +26,7 @@ libc = "0.2"
 notify = "7"
 notify-debouncer-mini = "0.5"
 dotenvy = "0.15"
+strip-ansi-escapes = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

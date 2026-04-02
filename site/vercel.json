@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/releases/:path*",
+      "destination": "https://kemo0x3updk0vrnm.public.blob.vercel-storage.com/releases/:path*"
+    }
+  ]
+}

@@ -176,6 +176,7 @@ impl App {
                     .get(&service)
                     .copied()
                     .unwrap_or(Color::White);
+                let line = strip_ansi_escapes::strip_str(&line).to_string();
                 self.log_entries.push_back(LogEntry {
                     service,
                     line,

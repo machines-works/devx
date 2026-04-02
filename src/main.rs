@@ -12,6 +12,7 @@ use devx::control;
 use devx::daemon;
 use devx::events::DevxEvent;
 use devx::infra;
+use devx::init;
 use devx::orchestrator::Orchestrator;
 use devx::tls;
 use devx::tui::App;
@@ -58,6 +59,8 @@ enum Commands {
         #[arg(short = 'n', long = "lines", default_value = "50")]
         lines: usize,
     },
+    /// Initialize a new devx.toml in the current directory
+    Init,
 }
 
 fn main() -> Result<()> {
@@ -78,6 +81,7 @@ fn main() -> Result<()> {
             service,
             lines,
         } => cmd_logs(follow, service, lines),
+        Commands::Init => init::cmd_init(),
     }
 }
 
