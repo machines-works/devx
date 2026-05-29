@@ -9,6 +9,7 @@ pub mod infra;
 pub mod init;
 pub mod orchestrator;
 pub mod ports;
+pub mod project;
 pub mod process;
 pub mod proxy;
 pub mod tls;

@@ -36,6 +36,10 @@ pub enum OrchestratorCommand {
 pub struct Orchestrator {
     config: DevxConfig,
     project_root: PathBuf,
+    /// Effective instance id used to key the control socket. Resolved by the
+    /// CLI (--project / DEVX_PROJECT / worktree auto-derive / config name) and
+    /// threaded in so the daemon binds the same socket the CLI talks to.
+    project_id: String,
     processes: HashMap<String, ManagedProcess>,
     actual_ports: HashMap<String, u16>,
     proxy_ports: HashMap<String, u16>,
@@ -54,11 +58,13 @@ impl Orchestrator {
         config: DevxConfig,
         project_root: PathBuf,
         event_tx: mpsc::Sender<DevxEvent>,
+        project_id: String,
     ) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel(64);
         Self {
             config,
             project_root,
+            project_id,
             processes: HashMap::new(),
             actual_ports: HashMap::new(),
             proxy_ports: HashMap::new(),
@@ -348,7 +354,7 @@ impl Orchestrator {
         }
 
         // Start control socket server
-        let ctrl_project = self.config.project.name.clone();
+        let ctrl_project = self.project_id.clone();
         let ctrl_tx = self.event_tx.clone();
         let ctrl_tx2 = self.event_tx.clone();
         let ctrl_cmd_tx = self.cmd_tx.clone();
@@ -428,7 +434,7 @@ impl Orchestrator {
                         .collect();
                     let response = serde_json::json!({
                         "services": statuses,
-                        "project": self.config.project.name,
+                        "project": self.project_id,
                     });
                     let _ = reply.send(response.to_string());
                 }

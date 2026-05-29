@@ -33,6 +33,9 @@ fn devx(dir: &Path) -> Command {
 struct TestProject {
     dir: TempDir,
     name: String,
+    /// Extra instance ids started under `--project`/`DEVX_PROJECT` that must be
+    /// torn down on drop in addition to the config-name default.
+    extra_instances: std::cell::RefCell<Vec<String>>,
 }
 
 impl TestProject {
@@ -46,7 +49,11 @@ impl TestProject {
             .expect("devx.toml must have a project name")
             .to_string();
         cleanup_project(&name);
-        Self { dir, name }
+        Self {
+            dir,
+            name,
+            extra_instances: std::cell::RefCell::new(Vec::new()),
+        }
     }
 
     fn path(&self) -> &Path {
@@ -57,16 +64,35 @@ impl TestProject {
         devx(self.path())
     }
 
+    /// Register an explicit `--project` instance id so it is cleaned up on drop.
+    /// Pre-cleans any leftover state for that id (mirrors `new`).
+    fn instance(&self, id: &str) -> &Self {
+        cleanup_project(id);
+        self.extra_instances.borrow_mut().push(id.to_string());
+        self
+    }
+
     fn wait_for_socket(&self) {
+        self.wait_for_socket_id(&self.name);
+    }
+
+    fn wait_for_socket_id(&self, id: &str) {
         let ready = wait_for(Duration::from_secs(5), Duration::from_millis(100), || {
-            socket_path(&self.name).exists()
+            socket_path(id).exists()
         });
-        assert!(ready, "control socket didn't appear within 5s");
+        assert!(
+            ready,
+            "control socket for '{}' didn't appear within 5s",
+            id
+        );
     }
 }
 
 impl Drop for TestProject {
     fn drop(&mut self) {
+        for id in self.extra_instances.borrow().iter() {
+            cleanup_project(id);
+        }
         cleanup_project(&self.name);
     }
 }
@@ -628,4 +654,251 @@ fn restart_when_not_running_fails() {
     let p = TestProject::new(&simple_toml(&unique_name("restart-norun")));
     let out = p.devx().args(["restart", "sleeper"]).output().unwrap();
     assert!(!out.status.success());
+}
+
+// ---------------------------------------------------------------------------
+// Named instances / per-worktree project identity (--project / DEVX_PROJECT)
+// ---------------------------------------------------------------------------
+
+/// A toml whose service binds a vhost domain, used to exercise vhost-port
+/// contention between two instances started from the same checkout.
+fn domain_toml(project_name: &str, domain: &str) -> String {
+    format!(
+        r#"[project]
+name = "{project_name}"
+
+[services.domain]
+cmd = "sleep 300"
+port = 0
+domain = "{domain}"
+watch = false
+"#,
+    )
+}
+
+/// (9) Two named instances from one devx.toml get distinct sockets/PIDs, each
+/// reports its own id over its own socket, and `down --project` only removes
+/// the targeted instance.
+#[test]
+fn two_named_instances_distinct_sockets() {
+    let base = unique_name("named");
+    let a = format!("{base}-a");
+    let b = format!("{base}-b");
+    let p = TestProject::new(&simple_toml(&base));
+    p.instance(&a).instance(&b);
+
+    assert_ne!(a, b);
+
+    let out = p.devx().args(["up", "-d", "--project", &a]).output().unwrap();
+    assert!(out.status.success(), "up A failed: {}", stderr(&out));
+    let out = p.devx().args(["up", "-d", "--project", &b]).output().unwrap();
+    assert!(out.status.success(), "up B failed: {}", stderr(&out));
+
+    p.wait_for_socket_id(&a);
+    p.wait_for_socket_id(&b);
+
+    // Distinct sockets + PIDs.
+    assert!(socket_path(&a).exists(), "socket A should exist");
+    assert!(socket_path(&b).exists(), "socket B should exist");
+    assert!(pid_path(&a).exists(), "pid A should exist");
+    assert!(pid_path(&b).exists(), "pid B should exist");
+
+    let pid_a = fs::read_to_string(pid_path(&a)).unwrap();
+    let pid_b = fs::read_to_string(pid_path(&b)).unwrap();
+    assert_ne!(pid_a.trim(), pid_b.trim(), "PIDs must differ");
+
+    thread::sleep(Duration::from_millis(500));
+
+    // Each socket echoes its own resolved id in the status "project" field.
+    let resp_a = send_socket_command(&a, r#"{"cmd":"status"}"#);
+    let json_a: serde_json::Value = serde_json::from_str(resp_a.trim()).unwrap();
+    assert_eq!(json_a["project"], a, "A status should report id A");
+
+    let resp_b = send_socket_command(&b, r#"{"cmd":"status"}"#);
+    let json_b: serde_json::Value = serde_json::from_str(resp_b.trim()).unwrap();
+    assert_eq!(json_b["project"], b, "B status should report id B");
+
+    // down --project A removes only A's socket+pid; B's survive.
+    let out = p.devx().args(["down", "--project", &a]).output().unwrap();
+    assert!(out.status.success(), "down A failed: {}", stderr(&out));
+
+    let a_gone = wait_for(Duration::from_secs(5), Duration::from_millis(100), || {
+        !socket_path(&a).exists() && !pid_path(&a).exists()
+    });
+    assert!(a_gone, "A's socket+pid should be removed");
+    assert!(socket_path(&b).exists(), "B's socket should still exist");
+    assert!(pid_path(&b).exists(), "B's pid should still exist");
+
+    // Now down B.
+    let out = p.devx().args(["down", "--project", &b]).output().unwrap();
+    assert!(out.status.success(), "down B failed: {}", stderr(&out));
+}
+
+/// (10) The singleton guard is scoped to the resolved id: starting the same id
+/// twice fails, but a different id from the same checkout still starts.
+#[test]
+fn singleton_guard_per_id() {
+    let base = unique_name("guard");
+    let a = format!("{base}-a");
+    let b = format!("{base}-b");
+    let p = TestProject::new(&simple_toml(&base));
+    p.instance(&a).instance(&b);
+
+    let out = p.devx().args(["up", "-d", "--project", &a]).output().unwrap();
+    assert!(out.status.success(), "first A failed: {}", stderr(&out));
+    p.wait_for_socket_id(&a);
+
+    // Second start of the SAME id must fail with "already running".
+    let out = p.devx().args(["up", "-d", "--project", &a]).output().unwrap();
+    assert!(!out.status.success(), "second A should fail");
+    let err = stderr(&out);
+    assert!(err.contains("already running"), "got: {}", err);
+
+    // A different id from the same checkout still starts (guard is per-id).
+    let out = p.devx().args(["up", "-d", "--project", &b]).output().unwrap();
+    assert!(out.status.success(), "B should start: {}", stderr(&out));
+    p.wait_for_socket_id(&b);
+
+    p.devx().args(["down", "--project", &a]).output().unwrap();
+    p.devx().args(["down", "--project", &b]).output().unwrap();
+}
+
+/// (11) With no flag in a normal (non-worktree) temp dir, the socket appears at
+/// exactly /tmp/devx-{config name}.sock and `devx down` (no flag) stops it.
+/// Confirms the zero-change default end-to-end.
+#[test]
+fn backward_compat_default_path() {
+    let name = unique_name("compat-default");
+    let p = TestProject::new(&simple_toml(&name));
+
+    let out = p.devx().args(["up", "-d"]).output().unwrap();
+    assert!(out.status.success(), "up -d failed: {}", stderr(&out));
+
+    // Socket must appear at exactly the config-name path (no suffix, no sanitize).
+    p.wait_for_socket();
+    assert_eq!(
+        socket_path(&p.name),
+        PathBuf::from(format!("/tmp/devx-{}.sock", name)),
+        "default socket path must equal the config name verbatim"
+    );
+    assert!(socket_path(&name).exists());
+
+    let out = p.devx().args(["down"]).output().unwrap();
+    assert!(out.status.success(), "down failed: {}", stderr(&out));
+    let stopped = wait_for(Duration::from_secs(5), Duration::from_millis(100), || {
+        !socket_path(&name).exists()
+    });
+    assert!(stopped, "default socket should be removed by down");
+}
+
+/// (12) down/status/logs/restart resolve identically to up only when given the
+/// same override. A daemon under --project A is invisible to bare commands,
+/// and visible to commands carrying the same flag or DEVX_PROJECT.
+#[test]
+fn override_symmetry() {
+    let base = unique_name("symmetry");
+    let a = format!("{base}-a");
+    let p = TestProject::new(&simple_toml(&base));
+    p.instance(&a);
+
+    let out = p.devx().args(["up", "-d", "--project", &a]).output().unwrap();
+    assert!(out.status.success(), "up A failed: {}", stderr(&out));
+    p.wait_for_socket_id(&a);
+
+    // Bare `status` resolves to the config name (base), which is NOT running.
+    let out = p.devx().args(["status"]).output().unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("not running"),
+        "bare status must not find instance A; got: {}",
+        stdout
+    );
+
+    // Bare `logs` resolves to the config name (base) — no log file -> fails.
+    let out = p.devx().args(["logs", "-n", "5"]).output().unwrap();
+    assert!(
+        !out.status.success(),
+        "bare logs must not find instance A's log"
+    );
+
+    // `status --project A` DOES find it.
+    let out = p
+        .devx()
+        .args(["status", "--project", &a])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("SERVICE") || stdout.contains("sleeper"),
+        "status --project A should show the running instance; got: {}",
+        stdout
+    );
+
+    // DEVX_PROJECT=A also finds it (env path, no flag).
+    let out = p
+        .devx()
+        .env("DEVX_PROJECT", &a)
+        .args(["logs", "-n", "5"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "DEVX_PROJECT=A logs should succeed: {}",
+        stderr(&out)
+    );
+
+    p.devx().args(["down", "--project", &a]).output().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// E2E: vhost contention between two instances (CI-safe, no root)
+// ---------------------------------------------------------------------------
+
+/// (13) Two instances from one checkout, each defining a `domain` service,
+/// both reach a started state. At most one binds the shared vhost port; the
+/// other degrades gracefully (per-service ServiceProxy ports) and still
+/// starts. Neither must fail to start due to vhost port contention.
+#[test]
+fn two_instances_both_start_despite_vhost() {
+    let base = unique_name("vhost");
+    let a = format!("{base}-a");
+    let b = format!("{base}-b");
+    let p = TestProject::new(&domain_toml(&base, "contend.localhost"));
+    p.instance(&a).instance(&b);
+
+    let out = p.devx().args(["up", "-d", "--project", &a]).output().unwrap();
+    assert!(out.status.success(), "up A failed: {}", stderr(&out));
+    let out = p.devx().args(["up", "-d", "--project", &b]).output().unwrap();
+    assert!(out.status.success(), "up B failed: {}", stderr(&out));
+
+    p.wait_for_socket_id(&a);
+    p.wait_for_socket_id(&b);
+
+    // Both daemons must still be alive (i.e. neither died on vhost contention)
+    // and report their service after a short settle.
+    thread::sleep(Duration::from_secs(2));
+
+    for id in [&a, &b] {
+        assert!(socket_path(id).exists(), "{} socket should exist", id);
+        let pid_str = fs::read_to_string(pid_path(id))
+            .unwrap_or_else(|_| panic!("{} pid file should exist", id));
+        let pid: i32 = pid_str.trim().parse().unwrap();
+        assert!(
+            unsafe { libc::kill(pid, 0) == 0 },
+            "{} daemon should still be alive (no vhost-contention crash)",
+            id
+        );
+
+        let resp = send_socket_command(id, r#"{"cmd":"status"}"#);
+        let json: serde_json::Value = serde_json::from_str(resp.trim())
+            .unwrap_or_else(|_| panic!("{} status should be JSON; got: {}", id, resp));
+        assert_eq!(json["project"], *id);
+        let services = json["services"].as_array().expect("services array");
+        assert_eq!(services.len(), 1, "{} should have one service", id);
+    }
+
+    p.devx().args(["down", "--project", &a]).output().unwrap();
+    p.devx().args(["down", "--project", &b]).output().unwrap();
 }

@@ -14,12 +14,18 @@ use devx::events::DevxEvent;
 use devx::infra;
 use devx::init;
 use devx::orchestrator::Orchestrator;
+use devx::project::resolve_project_id;
 use devx::tls;
 use devx::tui::App;
 
 #[derive(Parser)]
 #[command(name = "devx", about = "Local development orchestrator")]
 struct Cli {
+    /// Override the project instance id (socket/PID/log key). Defaults to
+    /// [project].name, or "{name}-{worktree-dir}" inside a linked git worktree.
+    #[arg(short = 'p', long = "project", global = true)]
+    project: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -69,18 +75,19 @@ fn main() -> Result<()> {
         .expect("failed to install rustls crypto provider");
 
     let cli = Cli::parse();
+    let project = cli.project;
     match cli.command {
-        Commands::Up { daemon, services } => cmd_up(daemon, services),
-        Commands::Down => cmd_down(),
-        Commands::Restart { service } => cmd_restart(service),
-        Commands::Status => cmd_status(),
+        Commands::Up { daemon, services } => cmd_up(daemon, services, project),
+        Commands::Down => cmd_down(project),
+        Commands::Restart { service } => cmd_restart(service, project),
+        Commands::Status => cmd_status(project),
         Commands::Check => cmd_check(),
         Commands::Trust => cmd_trust(),
         Commands::Logs {
             follow,
             service,
             lines,
-        } => cmd_logs(follow, service, lines),
+        } => cmd_logs(follow, service, lines, project),
         Commands::Init => init::cmd_init(),
     }
 }
@@ -111,30 +118,35 @@ fn service_filter(services: Vec<String>) -> Option<Vec<String>> {
     }
 }
 
-fn cmd_up(daemon_mode: bool, services: Vec<String>) -> Result<()> {
+fn cmd_up(daemon_mode: bool, services: Vec<String>, project: Option<String>) -> Result<()> {
     let (project_root, config) = load_project_config()?;
-    let project_name = &config.project.name;
+    let project_id = resolve_project_id(&config, project.as_deref());
 
-    if daemon::is_running(project_name) {
+    if daemon::is_running(&project_id) {
         bail!(
             "devx is already running for '{}'. Use 'devx down' first.",
-            project_name
+            project_id
         );
     }
 
     if daemon_mode {
-        cmd_up_daemon(config, project_root, services)
+        cmd_up_daemon(config, project_root, services, project_id)
     } else {
-        cmd_up_tui(config, project_root, services)
+        cmd_up_tui(config, project_root, services, project_id)
     }
 }
 
-fn cmd_up_tui(config: DevxConfig, project_root: PathBuf, services: Vec<String>) -> Result<()> {
+fn cmd_up_tui(
+    config: DevxConfig,
+    project_root: PathBuf,
+    services: Vec<String>,
+    project_id: String,
+) -> Result<()> {
     let (event_tx, event_rx) = mpsc::channel(8192);
 
-    let project_name = config.project.name.clone();
-    let project_name_cleanup = project_name.clone();
-    let mut orchestrator = Orchestrator::new(config, project_root.clone(), event_tx);
+    let project_id_cleanup = project_id.clone();
+    let mut orchestrator =
+        Orchestrator::new(config, project_root.clone(), event_tx, project_id.clone());
     let service_names = orchestrator.service_names();
 
     let filter = service_filter(services);
@@ -157,14 +169,14 @@ fn cmd_up_tui(config: DevxConfig, project_root: PathBuf, services: Vec<String>) 
     let branch = devx::git::current_branch();
 
     let mut terminal = ratatui::init();
-    let mut app = App::new(project_name, service_names, branch, cmd_tx, event_rx);
+    let mut app = App::new(project_id, service_names, branch, cmd_tx, event_rx);
 
     let result = runtime.block_on(app.run(&mut terminal));
 
     ratatui::restore();
 
     // Clean up the control socket
-    control::cleanup(&project_name_cleanup);
+    control::cleanup(&project_id_cleanup);
 
     // Shutdown runtime (drops orchestrator, kills processes via kill_on_drop)
     runtime.shutdown_timeout(std::time::Duration::from_secs(2));
@@ -172,17 +184,21 @@ fn cmd_up_tui(config: DevxConfig, project_root: PathBuf, services: Vec<String>) 
     result
 }
 
-fn cmd_up_daemon(config: DevxConfig, project_root: PathBuf, services: Vec<String>) -> Result<()> {
-    let project_name = config.project.name.clone();
-
+fn cmd_up_daemon(
+    config: DevxConfig,
+    project_root: PathBuf,
+    services: Vec<String>,
+    project_id: String,
+) -> Result<()> {
     // Parent prints PID and exits; child continues past this point
-    daemon::daemonize(&project_name)?;
+    daemon::daemonize(&project_id)?;
 
-    let log_file_path = daemon::log_path(&project_name);
-    let project_name_cleanup = project_name.clone();
+    let log_file_path = daemon::log_path(&project_id);
+    let project_id_cleanup = project_id.clone();
 
     let (event_tx, mut event_rx) = mpsc::channel(8192);
-    let mut orchestrator = Orchestrator::new(config, project_root.clone(), event_tx);
+    let mut orchestrator =
+        Orchestrator::new(config, project_root.clone(), event_tx, project_id.clone());
     let cmd_tx = orchestrator.cmd_sender();
     let filter = service_filter(services);
 
@@ -258,8 +274,8 @@ fn cmd_up_daemon(config: DevxConfig, project_root: PathBuf, services: Vec<String
         let _ = log_file.flush();
     });
 
-    control::cleanup(&project_name_cleanup);
-    daemon::cleanup_pid(&project_name_cleanup);
+    control::cleanup(&project_id_cleanup);
+    daemon::cleanup_pid(&project_id_cleanup);
     runtime.shutdown_timeout(std::time::Duration::from_secs(2));
 
     Ok(())
@@ -342,13 +358,13 @@ fn write_event_to_log(log_file: &mut std::fs::File, event: &DevxEvent) {
     let _ = log_file.flush();
 }
 
-fn cmd_down() -> Result<()> {
+fn cmd_down(project: Option<String>) -> Result<()> {
     let (_project_root, config) = load_project_config()?;
-    let project_name = config.project.name;
+    let project_id = resolve_project_id(&config, project.as_deref());
 
     let rt = tokio::runtime::Runtime::new()?;
     let response = rt.block_on(control::send_command(
-        &project_name,
+        &project_id,
         r#"{"cmd":"shutdown"}"#,
     ))?;
 
@@ -359,10 +375,10 @@ fn cmd_down() -> Result<()> {
     }
 
     // Clean up PID file if it exists (daemon mode)
-    daemon::cleanup_pid(&project_name);
+    daemon::cleanup_pid(&project_id);
 
     // Show log file location if it exists
-    let log = daemon::log_path(&project_name);
+    let log = daemon::log_path(&project_id);
     if log.exists() {
         println!("  logs: {}", log.display());
     }
@@ -370,14 +386,14 @@ fn cmd_down() -> Result<()> {
     Ok(())
 }
 
-fn cmd_restart(service: String) -> Result<()> {
+fn cmd_restart(service: String, project: Option<String>) -> Result<()> {
     let (_project_root, config) = load_project_config()?;
-    let project_name = config.project.name;
+    let project_id = resolve_project_id(&config, project.as_deref());
 
     let cmd = serde_json::json!({"cmd": "restart", "service": service}).to_string();
 
     let rt = tokio::runtime::Runtime::new()?;
-    let response = rt.block_on(control::send_command(&project_name, &cmd))?;
+    let response = rt.block_on(control::send_command(&project_id, &cmd))?;
 
     if response.contains("\"ok\"") {
         println!("{} restarted", service);
@@ -388,25 +404,25 @@ fn cmd_restart(service: String) -> Result<()> {
     Ok(())
 }
 
-fn cmd_status() -> Result<()> {
+fn cmd_status(project: Option<String>) -> Result<()> {
     let (_project_root, config) = load_project_config()?;
-    let project_name = config.project.name;
+    let project_id = resolve_project_id(&config, project.as_deref());
 
-    let socket = control::socket_path(&project_name);
+    let socket = control::socket_path(&project_id);
     if !socket.exists() {
-        println!("devx is not running for '{}'", project_name);
+        println!("devx is not running for '{}'", project_id);
         return Ok(());
     }
 
     let rt = tokio::runtime::Runtime::new()?;
-    let response = match rt.block_on(control::send_command(&project_name, r#"{"cmd":"status"}"#)) {
+    let response = match rt.block_on(control::send_command(&project_id, r#"{"cmd":"status"}"#)) {
         Ok(r) => r,
         Err(_) => {
             // Socket exists but nobody is listening — stale from a crash
             println!("devx appears to have crashed (stale socket)");
             println!("  cleaning up: {}", socket.display());
-            control::cleanup(&project_name);
-            daemon::cleanup_pid(&project_name);
+            control::cleanup(&project_id);
+            daemon::cleanup_pid(&project_id);
             return Ok(());
         }
     };
@@ -419,9 +435,9 @@ fn cmd_status() -> Result<()> {
     }
 
     // Show daemon info if PID file exists
-    if let Some(pid) = daemon::read_pid(&project_name) {
+    if let Some(pid) = daemon::read_pid(&project_id) {
         println!("devx daemon running (pid {})", pid);
-        println!("  logs: {}", daemon::log_path(&project_name).display());
+        println!("  logs: {}", daemon::log_path(&project_id).display());
         println!();
     }
 
@@ -472,15 +488,20 @@ fn format_uptime(secs: u64) -> String {
     }
 }
 
-fn cmd_logs(follow: bool, service_filter: Option<String>, lines: usize) -> Result<()> {
+fn cmd_logs(
+    follow: bool,
+    service_filter: Option<String>,
+    lines: usize,
+    project: Option<String>,
+) -> Result<()> {
     let (_project_root, config) = load_project_config()?;
-    let project_name = config.project.name;
+    let project_id = resolve_project_id(&config, project.as_deref());
 
-    let log_file_path = daemon::log_path(&project_name);
+    let log_file_path = daemon::log_path(&project_id);
     if !log_file_path.exists() {
         bail!(
             "no log file found for '{}' (expected {}). Is the daemon running?",
-            project_name,
+            project_id,
             log_file_path.display()
         );
     }
@@ -511,7 +532,7 @@ fn cmd_logs(follow: bool, service_filter: Option<String>, lines: usize) -> Resul
         return Ok(());
     }
 
-    if !daemon::is_running(&project_name) {
+    if !daemon::is_running(&project_id) {
         println!("(daemon is not running, cannot follow)");
         return Ok(());
     }
@@ -525,7 +546,7 @@ fn cmd_logs(follow: bool, service_filter: Option<String>, lines: usize) -> Resul
         match reader.read_line(&mut line) {
             Ok(0) => {
                 std::thread::sleep(std::time::Duration::from_millis(200));
-                if !daemon::is_running(&project_name) {
+                if !daemon::is_running(&project_id) {
                     println!("(daemon stopped)");
                     break;
                 }
