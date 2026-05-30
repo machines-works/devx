@@ -129,10 +129,15 @@ fn cmd_up(daemon_mode: bool, services: Vec<String>, project: Option<String>) -> 
         );
     }
 
+    // Resolve the deterministic per-worktree port offset once, alongside the
+    // project id. 0 in the primary checkout (ports unchanged byte-for-byte),
+    // a stable non-zero value in a linked worktree.
+    let port_offset = devx::ports::worktree_port_offset();
+
     if daemon_mode {
-        cmd_up_daemon(config, project_root, services, project_id)
+        cmd_up_daemon(config, project_root, services, project_id, port_offset)
     } else {
-        cmd_up_tui(config, project_root, services, project_id)
+        cmd_up_tui(config, project_root, services, project_id, port_offset)
     }
 }
 
@@ -141,12 +146,18 @@ fn cmd_up_tui(
     project_root: PathBuf,
     services: Vec<String>,
     project_id: String,
+    port_offset: u16,
 ) -> Result<()> {
     let (event_tx, event_rx) = mpsc::channel(8192);
 
     let project_id_cleanup = project_id.clone();
-    let mut orchestrator =
-        Orchestrator::new(config, project_root.clone(), event_tx, project_id.clone());
+    let mut orchestrator = Orchestrator::new(
+        config,
+        project_root.clone(),
+        event_tx,
+        project_id.clone(),
+        port_offset,
+    );
     let service_names = orchestrator.service_names();
 
     let filter = service_filter(services);
@@ -189,6 +200,7 @@ fn cmd_up_daemon(
     project_root: PathBuf,
     services: Vec<String>,
     project_id: String,
+    port_offset: u16,
 ) -> Result<()> {
     // Parent prints PID and exits; child continues past this point
     daemon::daemonize(&project_id)?;
@@ -197,8 +209,13 @@ fn cmd_up_daemon(
     let project_id_cleanup = project_id.clone();
 
     let (event_tx, mut event_rx) = mpsc::channel(8192);
-    let mut orchestrator =
-        Orchestrator::new(config, project_root.clone(), event_tx, project_id.clone());
+    let mut orchestrator = Orchestrator::new(
+        config,
+        project_root.clone(),
+        event_tx,
+        project_id.clone(),
+        port_offset,
+    );
     let cmd_tx = orchestrator.cmd_sender();
     let filter = service_filter(services);
 

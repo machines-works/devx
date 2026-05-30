@@ -40,6 +40,11 @@ pub struct Orchestrator {
     /// CLI (--project / DEVX_PROJECT / worktree auto-derive / config name) and
     /// threaded in so the daemon binds the same socket the CLI talks to.
     project_id: String,
+    /// Deterministic per-worktree offset added to every service's preferred
+    /// port. 0 in the primary checkout (ports unchanged byte-for-byte); a stable
+    /// non-zero value in a linked worktree so each checkout gets distinct,
+    /// bookmarkable URLs. Resolved once by the CLI and threaded in.
+    port_offset: u16,
     processes: HashMap<String, ManagedProcess>,
     actual_ports: HashMap<String, u16>,
     proxy_ports: HashMap<String, u16>,
@@ -59,12 +64,14 @@ impl Orchestrator {
         project_root: PathBuf,
         event_tx: mpsc::Sender<DevxEvent>,
         project_id: String,
+        port_offset: u16,
     ) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel(64);
         Self {
             config,
             project_root,
             project_id,
+            port_offset,
             processes: HashMap::new(),
             actual_ports: HashMap::new(),
             proxy_ports: HashMap::new(),
@@ -94,6 +101,15 @@ impl Orchestrator {
         Framework::detect(&svc.cmd, &work_dir).self_managed()
     }
 
+    /// The service's preferred (proxy / self-managed listen) port after applying
+    /// the deterministic per-worktree offset. `None` if the service declares no
+    /// port. In the primary checkout `port_offset == 0`, so this is the
+    /// configured port unchanged.
+    fn preferred_port(&self, svc: &ServiceConfig) -> Option<u16> {
+        svc.port
+            .map(|p| crate::ports::apply_offset(p, self.port_offset))
+    }
+
     fn dep_graph(&self) -> HashMap<String, Vec<String>> {
         self.config
             .services
@@ -103,6 +119,16 @@ impl Orchestrator {
     }
 
     pub async fn start(&mut self, filter: Option<&[String]>) -> Result<()> {
+        if self.port_offset != 0 {
+            let _ = self.event_tx.try_send(DevxEvent::LogLine {
+                service: "devx".to_string(),
+                line: format!(
+                    "per-worktree port offset +{} (preferred ports shifted; primary checkout uses 0)",
+                    self.port_offset
+                ),
+                is_stderr: false,
+            });
+        }
         if let Some(infra_cfg) = &self.config.infra {
             let compose_path = self.project_root.join(&infra_cfg.compose);
             infra::ensure_compose(&compose_path)?;
@@ -125,7 +151,7 @@ impl Orchestrator {
 
                 if self.is_self_managed(name, svc) {
                     // Self-managed: service owns its port. Use preferred as actual.
-                    if let Some(preferred_port) = svc.port {
+                    if let Some(preferred_port) = self.preferred_port(svc) {
                         self.actual_ports.insert(name.clone(), preferred_port);
                         // No separate proxy needed — actual == preferred
                     } else {
@@ -133,7 +159,7 @@ impl Orchestrator {
                         let alloc = self.allocator.allocate_any(name)?;
                         self.actual_ports.insert(name.clone(), alloc.actual);
                     }
-                } else if let Some(preferred_port) = svc.port {
+                } else if let Some(preferred_port) = self.preferred_port(svc) {
                     // Managed service with a port: random actual + proxy on preferred
                     let service_alloc = self.allocator.allocate_any(name)?;
                     self.actual_ports.insert(name.clone(), service_alloc.actual);
@@ -271,7 +297,7 @@ impl Orchestrator {
                     .ok_or_else(|| anyhow::anyhow!("service '{}' not found in config", name))?
                     .clone();
                 let port_alloc = PortAllocation {
-                    preferred: svc.port,
+                    preferred: self.preferred_port(&svc),
                     actual: *self
                         .actual_ports
                         .get(name)
@@ -478,8 +504,8 @@ impl Orchestrator {
             .clone();
 
         let actual_port = if self.is_self_managed(name, &svc) {
-            // Self-managed: reuse the same port (service owns it)
-            svc.port
+            // Self-managed: reuse the same (offset-adjusted) port (service owns it)
+            self.preferred_port(&svc)
                 .unwrap_or_else(|| *self.actual_ports.get(name).unwrap_or(&0))
         } else {
             // Managed: re-allocate a fresh port
@@ -495,7 +521,7 @@ impl Orchestrator {
         }
 
         let port_alloc = PortAllocation {
-            preferred: svc.port,
+            preferred: self.preferred_port(&svc),
             actual: actual_port,
             remapped: false,
         };
@@ -547,13 +573,13 @@ impl Orchestrator {
 
             // Allocate ports
             if self.is_self_managed(name, &svc) {
-                if let Some(preferred_port) = svc.port {
+                if let Some(preferred_port) = self.preferred_port(&svc) {
                     self.actual_ports.insert(name.clone(), preferred_port);
                 } else {
                     let alloc = self.allocator.allocate_any(name)?;
                     self.actual_ports.insert(name.clone(), alloc.actual);
                 }
-            } else if let Some(preferred_port) = svc.port {
+            } else if let Some(preferred_port) = self.preferred_port(&svc) {
                 let service_alloc = self.allocator.allocate_any(name)?;
                 self.actual_ports.insert(name.clone(), service_alloc.actual);
                 let proxy_alloc = self.allocator.allocate(name, preferred_port)?;
@@ -564,7 +590,7 @@ impl Orchestrator {
             }
 
             let port_alloc = PortAllocation {
-                preferred: svc.port,
+                preferred: self.preferred_port(&svc),
                 actual: *self
                     .actual_ports
                     .get(name)
