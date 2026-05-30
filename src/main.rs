@@ -363,10 +363,7 @@ fn cmd_down(project: Option<String>) -> Result<()> {
     let project_id = resolve_project_id(&config, project.as_deref());
 
     let rt = tokio::runtime::Runtime::new()?;
-    let response = rt.block_on(control::send_command(
-        &project_id,
-        r#"{"cmd":"shutdown"}"#,
-    ))?;
+    let response = rt.block_on(control::send_command(&project_id, r#"{"cmd":"shutdown"}"#))?;
 
     if response.contains("\"ok\"") {
         println!("devx stopped");

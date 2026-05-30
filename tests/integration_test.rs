@@ -80,11 +80,7 @@ impl TestProject {
         let ready = wait_for(Duration::from_secs(5), Duration::from_millis(100), || {
             socket_path(id).exists()
         });
-        assert!(
-            ready,
-            "control socket for '{}' didn't appear within 5s",
-            id
-        );
+        assert!(ready, "control socket for '{}' didn't appear within 5s", id);
     }
 }
 
@@ -172,7 +168,7 @@ fn send_socket_command(project_name: &str, cmd: &str) -> String {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
-    write!(stream, "{}\n", cmd).expect("failed to write to socket");
+    writeln!(stream, "{}", cmd).expect("failed to write to socket");
     stream
         .shutdown(std::net::Shutdown::Write)
         .expect("failed to shutdown write");
@@ -189,13 +185,13 @@ fn cleanup_project(project_name: &str) {
         let _ = send_socket_command(project_name, r#"{"cmd":"shutdown"}"#);
         thread::sleep(Duration::from_millis(500));
     }
-    if let Ok(pid_str) = fs::read_to_string(pid_path(project_name)) {
-        if let Ok(pid) = pid_str.trim().parse::<i32>() {
-            unsafe {
-                libc::kill(pid, libc::SIGKILL);
-            }
-            thread::sleep(Duration::from_millis(200));
+    if let Ok(pid_str) = fs::read_to_string(pid_path(project_name))
+        && let Ok(pid) = pid_str.trim().parse::<i32>()
+    {
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
         }
+        thread::sleep(Duration::from_millis(200));
     }
     let _ = fs::remove_file(socket_path(project_name));
     let _ = fs::remove_file(pid_path(project_name));
@@ -689,9 +685,17 @@ fn two_named_instances_distinct_sockets() {
 
     assert_ne!(a, b);
 
-    let out = p.devx().args(["up", "-d", "--project", &a]).output().unwrap();
+    let out = p
+        .devx()
+        .args(["up", "-d", "--project", &a])
+        .output()
+        .unwrap();
     assert!(out.status.success(), "up A failed: {}", stderr(&out));
-    let out = p.devx().args(["up", "-d", "--project", &b]).output().unwrap();
+    let out = p
+        .devx()
+        .args(["up", "-d", "--project", &b])
+        .output()
+        .unwrap();
     assert!(out.status.success(), "up B failed: {}", stderr(&out));
 
     p.wait_for_socket_id(&a);
@@ -744,18 +748,30 @@ fn singleton_guard_per_id() {
     let p = TestProject::new(&simple_toml(&base));
     p.instance(&a).instance(&b);
 
-    let out = p.devx().args(["up", "-d", "--project", &a]).output().unwrap();
+    let out = p
+        .devx()
+        .args(["up", "-d", "--project", &a])
+        .output()
+        .unwrap();
     assert!(out.status.success(), "first A failed: {}", stderr(&out));
     p.wait_for_socket_id(&a);
 
     // Second start of the SAME id must fail with "already running".
-    let out = p.devx().args(["up", "-d", "--project", &a]).output().unwrap();
+    let out = p
+        .devx()
+        .args(["up", "-d", "--project", &a])
+        .output()
+        .unwrap();
     assert!(!out.status.success(), "second A should fail");
     let err = stderr(&out);
     assert!(err.contains("already running"), "got: {}", err);
 
     // A different id from the same checkout still starts (guard is per-id).
-    let out = p.devx().args(["up", "-d", "--project", &b]).output().unwrap();
+    let out = p
+        .devx()
+        .args(["up", "-d", "--project", &b])
+        .output()
+        .unwrap();
     assert!(out.status.success(), "B should start: {}", stderr(&out));
     p.wait_for_socket_id(&b);
 
@@ -801,7 +817,11 @@ fn override_symmetry() {
     let p = TestProject::new(&simple_toml(&base));
     p.instance(&a);
 
-    let out = p.devx().args(["up", "-d", "--project", &a]).output().unwrap();
+    let out = p
+        .devx()
+        .args(["up", "-d", "--project", &a])
+        .output()
+        .unwrap();
     assert!(out.status.success(), "up A failed: {}", stderr(&out));
     p.wait_for_socket_id(&a);
 
@@ -823,11 +843,7 @@ fn override_symmetry() {
     );
 
     // `status --project A` DOES find it.
-    let out = p
-        .devx()
-        .args(["status", "--project", &a])
-        .output()
-        .unwrap();
+    let out = p.devx().args(["status", "--project", &a]).output().unwrap();
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
@@ -868,9 +884,17 @@ fn two_instances_both_start_despite_vhost() {
     let p = TestProject::new(&domain_toml(&base, "contend.localhost"));
     p.instance(&a).instance(&b);
 
-    let out = p.devx().args(["up", "-d", "--project", &a]).output().unwrap();
+    let out = p
+        .devx()
+        .args(["up", "-d", "--project", &a])
+        .output()
+        .unwrap();
     assert!(out.status.success(), "up A failed: {}", stderr(&out));
-    let out = p.devx().args(["up", "-d", "--project", &b]).output().unwrap();
+    let out = p
+        .devx()
+        .args(["up", "-d", "--project", &b])
+        .output()
+        .unwrap();
     assert!(out.status.success(), "up B failed: {}", stderr(&out));
 
     p.wait_for_socket_id(&a);
