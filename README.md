@@ -93,6 +93,40 @@ worktree used the bare `[project].name`. After upgrading, that worktree resolves
 new auto-suffixed id, so the old daemon becomes invisible to bare commands. Stop it once
 via the old name (`devx down --project <oldname>`) before relying on the new id.
 
+### Deterministic per-worktree ports
+
+A linked worktree doesn't just get its own instance id — it also gets its own **stable
+set of preferred ports**, so each checkout has a fixed, bookmarkable
+`http://localhost:<port>` that survives restarts.
+
+Without this, two worktrees both want the same preferred port (e.g. `3001`); the first
+wins and the second's reverse proxy falls back to a *random* free port, so its URL
+changes on every boot. devx fixes that by adding a deterministic offset to every
+service's preferred port:
+
+- **Primary checkout (or any non-git dir):** offset `0` — preferred ports are used
+  unchanged, byte-for-byte. Existing setups behave exactly as before.
+- **Linked git worktree:** a stable offset derived from the worktree directory name,
+  in `{10, 20, …, 160}` (stride 10, 16 slots). So a service on base port `3001` lands
+  on `3011`, `3021`, … depending on the worktree — and the *same* worktree always gets
+  the *same* ports.
+
+```
+                   commerce   bff    frontend
+primary checkout   9001       3101   3001        # offset 0
+worktree "wt-devx" 9001+N     3101+N 3001+N      # stable N ∈ {10..160}
+```
+
+The mapping is **stateless** — no registry file to allocate or clean up; the offset is
+hashed from the path each run. On the rare hash collision (two worktrees → same slot),
+the preferred ports match and the proxy's normal fall-back-to-free behavior keeps both
+bootable (one just loses its stable URL for that session). The offset is logged at
+startup (`[devx] per-worktree port offset +N`) and reflected in the `PROXY` column of
+`devx status`.
+
+This keeps every instance on plain `localhost` over HTTP — no certificates, no DNS
+vhosts, no gateway — which is what makes concurrent worktrees Clerk-friendly.
+
 ## Variable Interpolation
 
 - `${port}` — the actual allocated port for this service
