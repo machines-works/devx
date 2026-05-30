@@ -144,6 +144,24 @@ This means:
 - Stable URLs via proxy (e.g., `localhost:8000` always works)
 - Port changes on restart are transparent to clients
 
+### Deterministic per-worktree port offset
+
+Before allocation, every configured `port` is shifted by a **deterministic per-worktree offset**, so the same checkout always lands on the same preferred ports and concurrent worktrees don't fight over them.
+
+| | Context | Offset | Effect on preferred port `P` |
+|---|---------|--------|------------------------------|
+| (a) | Primary checkout / non-git dir | `0` | `P` (unchanged, byte-for-byte) |
+| (b) | Linked git worktree | stable `N ∈ {stride, 2·stride, …, SLOTS·stride}` | `P + N` |
+
+- The offset is resolved **once per `devx up` invocation** (alongside the [instance id](#project-identity--instance-resolution)) and threaded into the orchestrator, so every service in that run shifts consistently.
+- The worktree offset is derived from the **worktree directory basename** (`git rev-parse --show-toplevel` — the same stable, path-based key the instance id uses), hashed (FNV-1a) into a non-zero slot and scaled by the stride. It is **stateless** — no registry file; the same path always yields the same offset across runs, machines, and devx versions.
+- It is keyed on the worktree, **independent of `--project`/`DEVX_PROJECT`** (those name the instance; the offset separates the ports). It is also orthogonal to the actual-vs-proxy split above: the offset moves the *preferred* port; actual ports stay OS-random.
+- Constants: `WORKTREE_PORT_STRIDE = 10`, `WORKTREE_PORT_SLOTS = 16` (offsets `10..=160`). Kept small so offset ports stay near the base and remain bookmarkable.
+
+**Backward-compatibility guarantee (load-bearing):** in the primary checkout (or any non-git directory) the offset is `0`, so preferred ports are passed through **unchanged**. `git::is_worktree()` returns `false` there (errors swallowed), exactly as for the instance-id fallback, so existing projects keep their exact ports.
+
+**Collision behavior:** two distinct worktrees can hash to the same slot. devx does not detect or avoid this — the preferred ports simply match, and the standard fall-back-to-free behavior (below) keeps both instances bootable; one loses its stable URL for that session. The offset is also a `saturating_add`, so a preferred port near `u16::MAX` clamps instead of wrapping.
+
 ### Proxy behavior
 
 - HTTP/1.1 with header case preservation
