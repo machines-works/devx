@@ -165,10 +165,13 @@ fn cmd_up_tui(
     let runtime = tokio::runtime::Runtime::new()?;
 
     let cmd_tx = orchestrator.cmd_sender();
+    // Keep a sender for the explicit graceful shutdown below (the TUI's copy is
+    // moved into App).
+    let shutdown_tx = cmd_tx.clone();
 
     // Spawn orchestrator start + command loop in the background
     let filter_clone = filter.clone();
-    runtime.spawn(async move {
+    let orch_handle = runtime.spawn(async move {
         let filter_ref = filter_clone.as_deref();
         if let Err(e) = orchestrator.start(filter_ref).await {
             eprintln!("orchestrator error: {}", e);
@@ -186,10 +189,22 @@ fn cmd_up_tui(
 
     ratatui::restore();
 
+    // Gracefully stop all services BEFORE tearing down the runtime. Without this
+    // the runtime is dropped while services are still running; kill_on_drop only
+    // SIGKILLs the direct `sh` child, orphaning its tree (npm/node/vite/medusa).
+    // Telling the orchestrator to shut down runs proc.stop() (killpg on the whole
+    // group); awaiting its handle ensures that completes first.
+    runtime.block_on(async {
+        let _ = shutdown_tx
+            .send(devx::orchestrator::OrchestratorCommand::Shutdown)
+            .await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(12), orch_handle).await;
+    });
+
     // Clean up the control socket
     control::cleanup(&project_id_cleanup);
 
-    // Shutdown runtime (drops orchestrator, kills processes via kill_on_drop)
+    // Final backstop for any non-service tasks (proxies, watchers).
     runtime.shutdown_timeout(std::time::Duration::from_secs(2));
 
     result
@@ -222,7 +237,7 @@ fn cmd_up_daemon(
     let runtime = tokio::runtime::Runtime::new()?;
 
     let filter_clone = filter.clone();
-    runtime.spawn(async move {
+    let orch_handle = runtime.spawn(async move {
         let filter_ref = filter_clone.as_deref();
         if let Err(e) = orchestrator.start(filter_ref).await {
             eprintln!("orchestrator error: {}", e);
@@ -284,7 +299,15 @@ fn cmd_up_daemon(
         }
 
         // Tell orchestrator to gracefully stop all services (SIGTERM → 5s → SIGKILL)
+        // and WAIT for it to finish before falling through to runtime teardown.
+        // Without the await, the runtime is dropped while stop() is still in
+        // flight; kill_on_drop only SIGKILLs the direct `sh` child, orphaning its
+        // tree (npm/node/vite/medusa). Awaiting orch_handle guarantees every
+        // process group has been signaled (killpg) and reaped first. The 12s cap
+        // covers the worst case (SIGTERM 5s grace + reap) while services stop in
+        // parallel; the final shutdown_timeout is a backstop.
         let _ = cmd_tx.send(devx::orchestrator::OrchestratorCommand::Shutdown).await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(12), orch_handle).await;
 
         let ts = daemon::format_timestamp(SystemTime::now());
         let _ = writeln!(log_file, "[{}] [devx] daemon stopped", ts);

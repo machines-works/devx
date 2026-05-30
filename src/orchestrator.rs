@@ -635,8 +635,21 @@ impl Orchestrator {
     }
 
     pub async fn shutdown(&mut self) -> Result<()> {
-        for (_, proc) in self.processes.iter_mut() {
-            let _ = proc.stop().await;
+        // Stop every service concurrently. Each proc.stop() signals the whole
+        // process GROUP (the child is a session/group leader via setsid, and
+        // stop() uses killpg), so the entire tree — e.g. sh → npm → node → vite
+        // — is reaped, not just the direct `sh` child. Running them in parallel
+        // bounds total teardown by the slowest single service (SIGTERM grace +
+        // reap) instead of the sum across all services, so callers can await
+        // completion within a sane timeout before tearing down the runtime.
+        let mut handles = Vec::new();
+        for (_, mut proc) in self.processes.drain() {
+            handles.push(tokio::spawn(async move {
+                let _ = proc.stop().await;
+            }));
+        }
+        for handle in handles {
+            let _ = handle.await;
         }
         Ok(())
     }
