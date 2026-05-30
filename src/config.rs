@@ -150,7 +150,13 @@ pub fn interpolate(
         let after = &remaining[start + "${proxy:".len()..];
         if let Some(end) = after.find('}') {
             let name = &after[..end];
-            if let Some(&port) = proxy_ports.get(name) {
+            // Prefer the proxy port; fall back to the service's actual port when
+            // it has no proxy. A self-managed service (managed = false, e.g. a
+            // Vite dev server that binds its port directly) has no proxy port,
+            // but other services still need to reach it — `${proxy:NAME}` is the
+            // canonical "stable address of NAME", which for a self-managed
+            // service IS its actual port.
+            if let Some(&port) = proxy_ports.get(name).or_else(|| actual_ports.get(name)) {
                 output.push_str(&port.to_string());
             } else {
                 // leave the placeholder intact
@@ -167,4 +173,50 @@ pub fn interpolate(
     }
     output.push_str(remaining);
     output
+}
+
+#[cfg(test)]
+mod interpolate_tests {
+    use super::*;
+
+    fn ports() -> (HashMap<String, u16>, HashMap<String, u16>) {
+        let mut actual = HashMap::new();
+        actual.insert("web".to_string(), 51000); // self-managed: actual, no proxy
+        actual.insert("api".to_string(), 52000); // proxied: random actual
+        let mut proxy = HashMap::new();
+        proxy.insert("api".to_string(), 9001); // proxied: stable proxy port
+        (actual, proxy)
+    }
+
+    #[test]
+    fn port_uses_own_actual() {
+        let (a, p) = ports();
+        assert_eq!(interpolate("listen ${port}", "web", &a, &p), "listen 51000");
+    }
+
+    #[test]
+    fn proxy_ref_uses_proxy_port_when_proxied() {
+        let (a, p) = ports();
+        assert_eq!(
+            interpolate("http://localhost:${proxy:api}", "web", &a, &p),
+            "http://localhost:9001"
+        );
+    }
+
+    #[test]
+    fn proxy_ref_falls_back_to_actual_for_self_managed() {
+        // `web` is self-managed (no proxy port) — `${proxy:web}` must resolve to
+        // its actual port so other services' CORS/URLs still reach it.
+        let (a, p) = ports();
+        assert_eq!(
+            interpolate("origin http://localhost:${proxy:web}", "api", &a, &p),
+            "origin http://localhost:51000"
+        );
+    }
+
+    #[test]
+    fn unknown_proxy_ref_left_intact() {
+        let (a, p) = ports();
+        assert_eq!(interpolate("${proxy:nope}", "web", &a, &p), "${proxy:nope}");
+    }
 }
