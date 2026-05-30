@@ -59,6 +59,40 @@ depends_on = ["api"]
 VITE_API_URL = "http://localhost:${proxy:api}"
 ```
 
+## Named instances & worktrees
+
+By default devx keys its control socket, PID file, and log file on `[project].name`
+(`/tmp/devx-{name}.{sock,pid,log}`). You can run several independent instances of the
+same `devx.toml` by overriding that **instance id**:
+
+```bash
+devx up -d --project shimizu     # /tmp/devx-shimizu.sock
+devx up -d --project sharpi      # /tmp/devx-sharpi.sock — coexists with the above
+```
+
+The id is resolved once per command and honored by `up`, `down`, `restart`, `status`,
+and `logs`. Resolution precedence (first match wins):
+
+1. `--project`/`-p <NAME>` flag
+2. `DEVX_PROJECT=<NAME>` environment variable (non-empty)
+3. **Inside a linked git worktree**, devx auto-derives `{name}-{worktree-dir}` so each
+   worktree gets its own instance automatically — no flag needed.
+4. Otherwise the bare `[project].name` (unchanged default behavior).
+
+Use the same override on follow-up commands; a bare `devx status`/`devx down` resolves
+to the default id and will not see an instance you started under `--project`:
+
+```bash
+devx up -d --project sharpi
+devx status --project sharpi     # or: DEVX_PROJECT=sharpi devx status
+devx down   --project sharpi
+```
+
+**Transition caveat:** a daemon started by a pre-feature build from inside a linked
+worktree used the bare `[project].name`. After upgrading, that worktree resolves to the
+new auto-suffixed id, so the old daemon becomes invisible to bare commands. Stop it once
+via the old name (`devx down --project <oldname>`) before relying on the new id.
+
 ## Variable Interpolation
 
 - `${port}` — the actual allocated port for this service

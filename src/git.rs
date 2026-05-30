@@ -51,6 +51,25 @@ pub fn is_worktree() -> bool {
     }
 }
 
+/// Basename of the current worktree's checkout dir (`git rev-parse --show-toplevel`).
+/// Used to derive a STABLE per-worktree id suffix (path, not branch — see ADR/spec).
+/// Returns None outside a repo or if the toplevel has no file name, so the
+/// resolver cleanly falls through to config.project.name.
+pub fn worktree_suffix() -> Option<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let toplevel = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    std::path::Path::new(&toplevel)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_string())
+}
+
 /// Get the branch-prefixed domain variant.
 /// e.g., branch="fix-auth", domain="api.localhost" => "fix-auth.api.localhost"
 /// Returns None if on main/master or not in a git repo.
@@ -76,6 +95,35 @@ pub fn branch_domain(domain: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn worktree_suffix_none_outside_repo() {
+        // Build a fresh temp dir that is not inside any git repo. Running
+        // `git rev-parse --show-toplevel` there fails, so worktree_suffix()
+        // must return None (so the resolver falls through to config name).
+        // Mirror the error-swallowing style used by is_worktree().
+        let mut base = std::env::temp_dir();
+        base.push(format!(
+            "devx-worktree-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&base).expect("failed to create temp dir");
+
+        // Change cwd to the non-repo temp dir, probe, then restore.
+        let original = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(&base).expect("set cwd");
+        let suffix = worktree_suffix();
+        std::env::set_current_dir(&original).expect("restore cwd");
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert_eq!(suffix, None);
+    }
+
     #[test]
     fn branch_domain_returns_none_for_main() {
         // We can't easily mock git, but we can test the sanitization logic directly

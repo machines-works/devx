@@ -8,6 +8,14 @@ One command to run your entire dev stack.
 devx <command> [options]
 ```
 
+### Global options
+
+| Flag | Short | Description |
+|------|-------|-------------|
+| `--project <NAME>` | `-p` | Override the effective project instance id (the key for the socket/PID/log triple and the singleton guard). Honored by `up`, `down`, `restart`, `status`, and `logs`. `check`/`trust`/`init` ignore it (they touch no socket/PID). Default: `[project].name`, or `{name}-{worktree-dir}` inside a linked git worktree. |
+
+The `DEVX_PROJECT` environment variable does the same thing as `--project`, at lower precedence: a non-empty `DEVX_PROJECT` is used only when `--project` is absent. See [Project Identity / Instance Resolution](#project-identity--instance-resolution) for the full precedence chain.
+
 ### `devx up [--daemon] [SERVICES...]`
 
 Start all services (or a filtered subset).
@@ -20,7 +28,7 @@ Start all services (or a filtered subset).
 
 **Daemon mode** (`-d`): Fork to background. Parent prints PID and log file path, then exits. Child runs orchestrator headless, writing events to a log file.
 
-Prevents multiple instances per project — if a daemon is already running, exits with an error.
+Prevents multiple instances **per resolved id** — if a daemon is already running for the effective instance id, exits with an error. The singleton guard is scoped to the resolved id, not the bare `[project].name`. This means two named instances launched from the same checkout (`devx up -d --project shimizu` and `devx up -d --project sharpi`) coexist, each with its own socket/PID/log.
 
 **Startup sequence:**
 1. Find `devx.toml` by walking up from cwd
@@ -33,7 +41,7 @@ Prevents multiple instances per project — if a daemon is already running, exit
 8. Start vhost proxy (domain-based routing) if any service has `domain`
 9. Spawn processes in dependency wave order
 10. Start file watchers (per-service directories + devx.toml)
-11. Start control socket at `/tmp/devx-{project}.sock`
+11. Start control socket at `/tmp/devx-{id}.sock` (where `{id}` is the [resolved instance id](#project-identity--instance-resolution), not necessarily the bare project name)
 
 ### `devx down`
 
@@ -88,7 +96,7 @@ File: `devx.toml` in project root.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `name` | String | yes | Project identifier. Used for socket/PID/log file names. |
+| `name` | String | yes | Default project identifier. The effective instance id used for socket/PID/log keys is `name`, overridable by `--project`/`DEVX_PROJECT`, and auto-suffixed with the worktree directory name inside a linked git worktree. See [Project Identity / Instance Resolution](#project-identity--instance-resolution). |
 
 ### `[infra]`
 
@@ -238,7 +246,7 @@ This ensures all child processes (including those spawned by the service) are te
 
 ## Control Socket
 
-Unix domain socket at `/tmp/devx-{project}.sock`. JSON over newline-delimited protocol.
+Unix domain socket at `/tmp/devx-{id}.sock`, where `{id}` is the [resolved instance id](#project-identity--instance-resolution). JSON over newline-delimited protocol. The `status` reply echoes the effective id in its `project` field, so `devx status` output always matches the socket it answered on.
 
 ### Commands
 
@@ -275,9 +283,11 @@ Unix domain socket at `/tmp/devx-{project}.sock`. JSON over newline-delimited pr
 
 | File | Path |
 |------|------|
-| PID | `/tmp/devx-{project}.pid` |
-| Log | `/tmp/devx-{project}.log` |
-| Socket | `/tmp/devx-{project}.sock` |
+| PID | `/tmp/devx-{id}.pid` |
+| Log | `/tmp/devx-{id}.log` |
+| Socket | `/tmp/devx-{id}.sock` |
+
+`{id}` is the **effective instance id**, resolved once per invocation. Precedence (first match wins): (a) `--project`/`-p` flag, (b) non-empty `DEVX_PROJECT` env var, (c) inside a linked git worktree, `{name}-{worktree-dir}`, (d) otherwise `[project].name` verbatim. See [Project Identity / Instance Resolution](#project-identity--instance-resolution).
 
 ### Daemonization
 
@@ -300,6 +310,37 @@ Unix domain socket at `/tmp/devx-{project}.sock`. JSON over newline-delimited pr
 ### Signal handling
 
 SIGTERM triggers graceful shutdown — stops all services, cleans up PID file and socket.
+
+---
+
+## Project Identity / Instance Resolution
+
+Every name-keyed FS/OS resource (`/tmp/devx-{id}.sock`, `.pid`, `.log`, and the singleton liveness probe) is keyed by an **effective instance id**, resolved exactly once per CLI invocation and threaded into every subcommand that touches the control socket (`up`, `down`, `restart`, `status`, `logs`). Resolving it once guarantees all subcommands of one invocation agree on which instance they target.
+
+### Precedence
+
+First match wins:
+
+| | Source | Resolved id |
+|---|--------|-------------|
+| (a) | `--project`/`-p` flag | `sanitize(flag)` |
+| (b) | `DEVX_PROJECT` env var (non-empty after trim) | `sanitize(env)` |
+| (c) | Linked git worktree (`git-dir != git-common-dir`) | `{name}-{sanitize(worktree-dir-basename)}` |
+| (d) | Fallback | `[project].name` **verbatim** (no sanitization) |
+
+`sanitize` lowercases the string and replaces every character that is not alphanumeric or `-` with `-` (the same rule used by branch-prefixed vhost domains). Two distinct inputs can collapse to the same id (e.g. `feat_x` and `feat/x` both become `feat-x`); this is intentional and documented.
+
+### Path, not branch
+
+The worktree suffix (c) is derived from the **worktree directory basename** (`git rev-parse --show-toplevel`), not the branch name. The path is stable for the checkout's lifetime, so `up` and a later `down`/`status` in the same worktree re-derive the same id even after `git checkout` to another branch. Branch-prefixed vhost domains (the human-facing URL) remain branch-keyed and are a separate, unchanged concern.
+
+### Backward-compatibility guarantee
+
+In the primary worktree (or any non-git directory) with no `--project` and no `DEVX_PROJECT`, resolution reaches path (d) and returns `[project].name` **byte-for-byte** — no sanitization, no suffix. This is identical to pre-feature behavior, so existing projects keep their exact socket/PID/log paths. `git::is_worktree()` returns `false` for a primary checkout and for non-git directories (errors are swallowed), so path (c) cannot fire there.
+
+### Transition caveat
+
+A daemon started by a pre-feature build from inside a linked worktree used the bare `[project].name`. After upgrading, the same worktree resolves to the auto-suffixed id, so the old daemon becomes invisible to bare commands. Stop it once via the old id (`devx down --project <oldname>`) before relying on the new auto-suffixed id.
 
 ---
 
